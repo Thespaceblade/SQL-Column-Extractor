@@ -275,65 +275,73 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None) -> list:
             if not statements or all(s is None for s in statements):
                 continue
             
-            for stmt in statements:
+            # Process each statement individually, skip ones that fail
+            for i, stmt in enumerate(statements):
                 if stmt is None:
                     continue
                 
-                # Build alias mapping for this statement
-                alias_map = build_alias_map(stmt)
-                
-                # Resolve unqualified columns to their source tables
-                unqualified_map = resolve_unqualified_columns(stmt, alias_map)
-                
-                # Find all column references
-                for col in stmt.find_all(exp.Column):
-                    if col.name:
-                        # Get table name (either from column or from unqualified mapping)
-                        table_name = col.table
-                        
-                        # If column is unqualified, try to resolve it
-                        if not table_name and col.name in unqualified_map:
-                            table_name = unqualified_map[col.name]
-                        
-                        # Only include columns that have a table reference
-                        if not table_name:
+                try:
+                    # Build alias mapping for this statement
+                    alias_map = build_alias_map(stmt)
+                    
+                    # Resolve unqualified columns to their source tables
+                    unqualified_map = resolve_unqualified_columns(stmt, alias_map)
+                    
+                    # Find all column references
+                    for col in stmt.find_all(exp.Column):
+                        if col.name:
+                            # Get table name (either from column or from unqualified mapping)
+                            table_name = col.table
+                            
+                            # If column is unqualified, try to resolve it
+                            if not table_name and col.name in unqualified_map:
+                                table_name = unqualified_map[col.name]
+                            
+                            # Only include columns that have a table reference
+                            if not table_name:
+                                # Skip columns without table reference
+                                continue
+                            
+                            # Build fully qualified name
+                            parts = []
+                            
+                            # Add catalog if present
+                            if col.catalog:
+                                parts.append(col.catalog)
+                            
+                            # Add database/schema if present
+                            if col.db:
+                                parts.append(col.db)
+                            
+                            # Resolve table alias to actual table name
+                            if table_name in alias_map:
+                                # Replace alias with actual table name
+                                actual_table = alias_map[table_name]
+                                # Split the actual table name and use its parts
+                                table_parts = actual_table.split('.')
+                                parts.extend(table_parts)
+                            else:
+                                # Use table name as-is if not in alias map
+                                parts.append(table_name)
+                            
+                            # Add column name
+                            parts.append(col.name)
+                            
+                            # Join with dots: schema.table.column or table.column
+                            # Must have at least table.column (2 parts minimum)
+                            if len(parts) >= 2:
+                                qualified_name = ".".join(parts)
+                                columns.append(qualified_name)
                             # Skip columns without table reference
-                            continue
-                        
-                        # Build fully qualified name
-                        parts = []
-                        
-                        # Add catalog if present
-                        if col.catalog:
-                            parts.append(col.catalog)
-                        
-                        # Add database/schema if present
-                        if col.db:
-                            parts.append(col.db)
-                        
-                        # Resolve table alias to actual table name
-                        if table_name in alias_map:
-                            # Replace alias with actual table name
-                            actual_table = alias_map[table_name]
-                            # Split the actual table name and use its parts
-                            table_parts = actual_table.split('.')
-                            parts.extend(table_parts)
-                        else:
-                            # Use table name as-is if not in alias map
-                            parts.append(table_name)
-                        
-                        # Add column name
-                        parts.append(col.name)
-                        
-                        # Join with dots: schema.table.column or table.column
-                        # Must have at least table.column (2 parts minimum)
-                        if len(parts) >= 2:
-                            qualified_name = ".".join(parts)
-                            columns.append(qualified_name)
-                        # Skip columns without table reference
+                
+                except Exception as e:
+                    # Skip this statement but continue with others
+                    print(f"Warning: Skipped statement {i+1} due to error: {e}", file=sys.stderr)
+                    continue
             
-            # If we got here, parsing succeeded
-            return columns
+            # If we extracted any columns, return them (even if some statements failed)
+            if columns:
+                return columns
             
         except ParseError as e:
             last_error = e
@@ -344,9 +352,10 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None) -> list:
             # Try next dialect
             continue
     
-    # If all dialects failed, print error
+    # If all dialects failed, print error but don't fail completely
     if last_error:
-        print(f"Parse error (tried dialects: {', '.join(str(d) for d in dialects_to_try if d)}): {last_error}", file=sys.stderr)
+        print(f"Warning: Parse error (tried dialects: {', '.join(str(d) for d in dialects_to_try if d)}): {last_error}", file=sys.stderr)
+        print("Attempting to extract columns from successfully parsed statements...", file=sys.stderr)
     
     return columns
 
