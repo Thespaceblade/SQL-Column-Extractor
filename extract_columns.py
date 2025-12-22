@@ -57,11 +57,13 @@ def preprocess_sql(sql: str) -> str:
     # Remove SQL comments (/* */ style)
     sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
     
-    # Remove GO statements (SQL Server batch separator)
-    sql = re.sub(r'(?i)^\s*GO\s*$', '', sql, flags=re.MULTILINE)
+    # Remove USE statements first (before GO, since GO might follow USE)
+    # Match USE at start of line or after semicolon/newline, followed by database name
+    sql = re.sub(r'(?i)(?:^|[\n;])\s*USE\s+[^\s;]+(?:\s*;)?\s*(?=[\n;]|$|\s)', '', sql, flags=re.MULTILINE)
     
-    # Remove USE statements (can span multiple lines)
-    sql = re.sub(r'(?i)^\s*USE\s+[^;]+;?\s*$', '', sql, flags=re.MULTILINE)
+    # Remove GO statements (SQL Server batch separator) - can be standalone or with semicolon
+    # Match GO at start of line or after semicolon/newline/space, optionally followed by semicolon
+    sql = re.sub(r'(?i)(?:^|[\n;]|\s)\s*GO\s*;?\s*(?=[\n;]|$|\s)', '', sql, flags=re.MULTILINE)
     
     # Remove SET NOCOUNT ON/OFF
     sql = re.sub(r'(?i)SET\s+NOCOUNT\s+(ON|OFF)\s*;?', '', sql, flags=re.MULTILINE)
