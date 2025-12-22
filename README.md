@@ -4,13 +4,13 @@ Extract all `table.column` references from SQL files and output them to CSV or E
 
 ## Features
 
-- ✅ Extracts all table.column references from SQL files
-- ✅ Resolves table aliases to full table names (e.g., `e.employee_id` → `employees.employee_id`)
-- ✅ Resolves CTE aliases (e.g., `oh.level` → `org_hierarchy.level`)
-- ✅ Qualifies unqualified columns (e.g., `employee_id` → `employees.employee_id`)
-- ✅ Handles complex SQL: CTEs, subqueries, derived tables, recursive CTEs, UNIONs, JOINs
-- ✅ Outputs all occurrences (not just unique) - perfect for data dictionaries
-- ✅ Supports CSV and Excel output formats
+- Extracts all table.column references from SQL files
+- Resolves table aliases to full table names (e.g., `e.employee_id` → `employees.employee_id`)
+- Resolves CTE aliases (e.g., `oh.level` → `org_hierarchy.level`)
+- Qualifies unqualified columns (e.g., `employee_id` → `employees.employee_id`)
+- Handles complex SQL: CTEs, subqueries, derived tables, recursive CTEs, UNIONs, JOINs
+- Outputs all occurrences (not just unique) - perfect for data dictionaries
+- Supports CSV and Excel output formats
 
 ## Installation
 
@@ -78,26 +78,26 @@ The script generates a CSV or Excel file with two columns:
 
 ## How It Works
 
-1. **Parses SQL** using sqlglot to build an Abstract Syntax Tree (AST)
-2. **Resolves aliases** by mapping table aliases to their actual table/CTE names
-3. **Qualifies columns** by resolving unqualified columns to their source tables
-4. **Extracts references** by finding all column references in the AST
-5. **Outputs results** to CSV or Excel format
+1. Parses SQL using sqlglot to build an Abstract Syntax Tree (AST)
+2. Resolves aliases by mapping table aliases to their actual table/CTE names
+3. Qualifies columns by resolving unqualified columns to their source tables
+4. Extracts references by finding all column references in the AST
+5. Outputs results to CSV or Excel format
 
 ## Supported SQL Features
 
-- ✅ Common Table Expressions (CTEs)
-- ✅ Recursive CTEs
-- ✅ Subqueries (correlated, scalar, EXISTS, IN, etc.)
-- ✅ Derived tables (subqueries in FROM clause)
-- ✅ Window functions
-- ✅ Complex JOINs (INNER, LEFT, RIGHT, FULL OUTER, CROSS, LATERAL)
-- ✅ UNION, INTERSECT, EXCEPT
-- ✅ Aggregations and GROUP BY
-- ✅ CASE expressions
-- ✅ Multiple SQL dialects (PostgreSQL, MySQL, Snowflake, BigQuery, etc.)
+- Common Table Expressions (CTEs)
+- Recursive CTEs
+- Subqueries (correlated, scalar, EXISTS, IN, etc.)
+- Derived tables (subqueries in FROM clause)
+- Window functions
+- Complex JOINs (INNER, LEFT, RIGHT, FULL OUTER, CROSS, LATERAL)
+- UNION, INTERSECT, EXCEPT
+- Aggregations and GROUP BY
+- CASE expressions
+- Multiple SQL dialects (PostgreSQL, MySQL, Snowflake, BigQuery, etc.)
 
-## Examples
+## Example
 
 ### Input SQL
 ```sql
@@ -136,4 +136,3 @@ MIT License - feel free to use this script for your projects!
 - [sqlglot](https://github.com/tobymao/sqlglot) - SQL parser and transpiler
 - [pandas](https://pandas.pydata.org/) - Data manipulation (for Excel output)
 - [openpyxl](https://openpyxl.readthedocs.io/) - Excel file support
-
