@@ -488,8 +488,8 @@ def main():
     parser.add_argument(
         "--output",
         "-o",
-        default="columns.csv",
-        help="Output file (default: columns.csv, use .xlsx for Excel)"
+        default=None,
+        help="Output file (default: auto-named based on SQL file, use .xlsx for Excel)"
     )
     parser.add_argument(
         "--dataset",
@@ -534,8 +534,20 @@ def main():
     
     print(f"\nFound {total_count} total table.column references ({unique_count} unique)")
     
+    # Determine output file name
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        # Auto-name based on SQL file(s)
+        if len(sql_files) == 1:
+            # Single file: use SQL file name with appropriate extension
+            sql_file = sql_files[0]
+            output_path = sql_file.with_suffix('.csv')
+        else:
+            # Multiple files: use default name
+            output_path = Path("columns.csv")
+    
     # Output to CSV or Excel
-    output_path = Path(args.output)
     
     if output_path.suffix.lower() == '.xlsx':
         # Excel output
