@@ -557,7 +557,7 @@ def main():
     parser.add_argument(
         "files",
         nargs="*",
-        help="Specific SQL files to process (default: all .sql files in current directory)"
+        help="SQL files or directories to process (default: all .sql files in current directory). Directories are searched recursively."
     )
     parser.add_argument(
         "--dialect",
@@ -568,63 +568,83 @@ def main():
         "--output",
         "-o",
         default=None,
-        help="Output file (default: auto-named based on SQL file, use .xlsx for Excel)"
+        help="Output file (default: columns.csv in current directory, use .xlsx for Excel)"
     )
     parser.add_argument(
         "--dataset",
         default="SQL_Parser",
-        help="Dataset name to use in output (default: SQL_Parser)"
+        help="Dataset name to use in output (default: SQL_Parser). Note: Output format is now Filename, ColumnName"
     )
     
     args = parser.parse_args()
     
     # Determine which files to process
+    sql_files = []
+    
     if args.files:
-        # Use provided file paths (can be relative or absolute)
-        sql_files = [Path(f) for f in args.files]
+        # Process provided files/directories
+        for file_path in args.files:
+            path = Path(file_path)
+            if not path.exists():
+                print(f"Warning: Path not found: {path}", file=sys.stderr)
+                continue
+            
+            if path.is_file():
+                # Single file
+                if path.suffix.lower() == '.sql':
+                    sql_files.append(path)
+                else:
+                    print(f"Warning: Skipping non-SQL file: {path}", file=sys.stderr)
+            elif path.is_dir():
+                # Directory - find all SQL files recursively
+                found_files = sorted(path.rglob("*.sql"))
+                sql_files.extend(found_files)
+                print(f"Found {len(found_files)} SQL file(s) in {path}")
     else:
-        # Default to current directory
-        sql_files = sorted(Path.cwd().glob("*.sql"))
+        # Default to current directory (recursive)
+        sql_files = sorted(Path.cwd().rglob("*.sql"))
     
     if not sql_files:
         print("No SQL files found to process.")
         return
     
-    # Collect all column references (keep all occurrences, not unique)
-    all_columns = []
+    # Collect all column references with file tracking
+    # Structure: list of tuples (filename, column_name)
+    column_data = []
     file_columns = {}
     
-    print(f"Processing {len(sql_files)} SQL file(s)...")
+    print(f"\nProcessing {len(sql_files)} SQL file(s)...")
     
     for sql_file in sql_files:
-        if not sql_file.exists():
-            print(f"File not found: {sql_file}", file=sys.stderr)
+        print(f"  Processing: {sql_file}")
+        try:
+            columns = process_sql_file(sql_file, args.dialect)
+            # Store full relative path or just filename
+            file_key = str(sql_file.relative_to(Path.cwd())) if sql_file.is_relative_to(Path.cwd()) else str(sql_file)
+            file_columns[file_key] = columns
+            
+            # Add each column with its source file
+            for col in columns:
+                column_data.append((file_key, col))
+        except Exception as e:
+            print(f"  Error processing {sql_file}: {e}", file=sys.stderr)
             continue
-        
-        print(f"  Processing: {sql_file.name}")
-        columns = process_sql_file(sql_file, args.dialect)
-        all_columns.extend(columns)
-        file_columns[sql_file.name] = columns
     
     # Count unique vs total
+    all_columns = [col for _, col in column_data]
     unique_columns = sorted(set(all_columns))
-    total_count = len(all_columns)
+    total_count = len(column_data)
     unique_count = len(unique_columns)
     
     print(f"\nFound {total_count} total table.column references ({unique_count} unique)")
+    print(f"Across {len(file_columns)} file(s)")
     
     # Determine output file name
     if args.output:
         output_path = Path(args.output)
     else:
-        # Auto-name based on SQL file(s)
-        if len(sql_files) == 1:
-            # Single file: use SQL file name with appropriate extension
-            sql_file = sql_files[0]
-            output_path = sql_file.with_suffix('.csv')
-        else:
-            # Multiple files: use default name
-            output_path = Path("columns.csv")
+        # Default to columns.csv in current directory
+        output_path = Path("columns.csv")
     
     # Output to CSV or Excel
     
@@ -633,14 +653,16 @@ def main():
         try:
             import pandas as pd
             
+            # Create DataFrame with Filename and ColumnName
             df = pd.DataFrame({
-                'Dataset': [args.dataset] * len(all_columns),
-                'ColumnName': all_columns
+                'Filename': [filename for filename, _ in column_data],
+                'ColumnName': [col for _, col in column_data]
             })
             
             df.to_excel(output_path, index=False)
             print(f"\n✓ Output written to: {output_path}")
             print(f"  Rows: {len(df)} (all occurrences)")
+            print(f"  Columns: Filename, ColumnName")
             
         except ImportError:
             print("\nError: pandas and openpyxl required for Excel output.")
@@ -652,13 +674,14 @@ def main():
         # CSV output
         with open(output_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(['Dataset', 'ColumnName'])
+            writer.writerow(['Filename', 'ColumnName'])  # Header
             
-            for col in all_columns:
-                writer.writerow([args.dataset, col])
+            for filename, col in column_data:
+                writer.writerow([filename, col])
         
         print(f"\n✓ Output written to: {output_path}")
-        print(f"  Rows: {len(all_columns)} (all occurrences)")
+        print(f"  Rows: {len(column_data)} (all occurrences)")
+        print(f"  Columns: Filename, ColumnName")
     
     # Show summary by file
     print("\n" + "="*60)
@@ -670,12 +693,12 @@ def main():
     
     # Show sample of extracted columns
     print("\n" + "="*60)
-    print("SAMPLE COLUMNS (first 20)")
+    print("SAMPLE OUTPUT (first 20 rows)")
     print("="*60)
-    for col in all_columns[:20]:
-        print(f"  {col}")
-    if len(all_columns) > 20:
-        print(f"  ... and {len(all_columns) - 20} more")
+    for filename, col in column_data[:20]:
+        print(f"  {filename} | {col}")
+    if len(column_data) > 20:
+        print(f"  ... and {len(column_data) - 20} more rows")
 
 
 if __name__ == "__main__":
