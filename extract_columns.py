@@ -139,8 +139,10 @@ def build_alias_map(stmt: exp.Expression) -> dict:
             cte_name = cte.alias if isinstance(cte.alias, str) else cte.alias.name if hasattr(cte.alias, 'name') else str(cte.alias)
             if cte_name:
                 cte_names.add(cte_name)
-                # Map CTE name to itself
+                # Map CTE name to itself (store both original case and lowercase)
                 alias_map[cte_name] = cte_name
+                if isinstance(cte_name, str):
+                    alias_map[cte_name.lower()] = cte_name  # Case-insensitive lookup
     
     def extract_table_alias(table_expr, alias_map, cte_names, context_cte_names=None):
         """Extract table name and alias from a table expression."""
@@ -189,12 +191,15 @@ def build_alias_map(stmt: exp.Expression) -> dict:
                 # This is a real table, use full table name
                 resolved_name = full_table_name
             
-            # Map alias to resolved name
+            # Map alias to resolved name (store both original case and lowercase for case-insensitive lookup)
             if alias_name:
                 alias_map[alias_name] = resolved_name
+                alias_map[alias_name.lower()] = resolved_name  # Case-insensitive lookup
             
             # Also map table name to itself (in case it's used without alias)
             alias_map[table_name] = resolved_name
+            if isinstance(table_name, str):
+                alias_map[table_name.lower()] = resolved_name  # Case-insensitive lookup
         
         elif isinstance(table_expr, exp.Subquery):
             # Handle subqueries - get alias if present
