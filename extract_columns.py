@@ -11,6 +11,8 @@ Usage:
 
 import sys
 import csv
+import re
+import html
 from pathlib import Path
 from typing import Optional
 from collections import defaultdict
@@ -25,6 +27,99 @@ except ImportError:
     print("Install with: pip install sqlglot")
     print("Or for better performance: pip install 'sqlglot[rs]'")
     sys.exit(1)
+
+
+def preprocess_sql(sql: str) -> str:
+    """
+    Preprocess SQL to handle edge cases and remove problematic syntax.
+    
+    Handles:
+    - SQL comments (-- and /* */)
+    - DDL statements (CREATE, ALTER, DROP)
+    - DECLARE and SET statements
+    - WITH (NOLOCK) hints
+    - USE statements
+    - Isolation levels
+    - SET NOCOUNT ON/OFF
+    - ASCII control characters
+    - Escape codes
+    - HTML entities
+    - TOP clause (removed, but columns still extracted)
+    - Non-printable characters
+    - Normalize whitespace
+    """
+    # Decode HTML entities first (before removing other things)
+    sql = html.unescape(sql)
+    
+    # Remove SQL comments (-- style) - must come before other processing
+    sql = re.sub(r'--.*?$', '', sql, flags=re.MULTILINE)
+    
+    # Remove SQL comments (/* */ style)
+    sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
+    
+    # Remove GO statements (SQL Server batch separator)
+    sql = re.sub(r'(?i)^\s*GO\s*$', '', sql, flags=re.MULTILINE)
+    
+    # Remove USE statements (can span multiple lines)
+    sql = re.sub(r'(?i)^\s*USE\s+[^;]+;?\s*$', '', sql, flags=re.MULTILINE)
+    
+    # Remove SET NOCOUNT ON/OFF
+    sql = re.sub(r'(?i)SET\s+NOCOUNT\s+(ON|OFF)\s*;?', '', sql, flags=re.MULTILINE)
+    
+    # Remove SET TRANSACTION ISOLATION LEVEL
+    sql = re.sub(r'(?i)SET\s+TRANSACTION\s+ISOLATION\s+LEVEL\s+[^;]+;?', '', sql, flags=re.MULTILINE)
+    
+    # Remove other SET statements (but preserve UPDATE SET)
+    # Split by semicolons, process each statement
+    statements = sql.split(';')
+    cleaned_statements = []
+    for stmt in statements:
+        stmt = stmt.strip()
+        if not stmt:
+            continue
+        # Skip SET statements that aren't part of UPDATE
+        if re.match(r'(?i)^\s*SET\s+', stmt) and not re.search(r'(?i)\bUPDATE\s+.*\bSET\b', stmt):
+            continue
+        cleaned_statements.append(stmt)
+    sql = '; '.join(cleaned_statements)
+    
+    # Remove DECLARE statements
+    sql = re.sub(r'(?i)\bDECLARE\s+[^;]+;?', '', sql)
+    
+    # Remove DDL statements (CREATE, ALTER, DROP) - match entire statement
+    sql = re.sub(r'(?i)\b(CREATE|ALTER|DROP)\s+[^;]+;?', '', sql)
+    
+    # Remove WITH (NOLOCK) hints - multiple patterns
+    sql = re.sub(r'(?i)\s+WITH\s*\(\s*NOLOCK\s*\)', '', sql)
+    sql = re.sub(r'(?i)\(\s*NOLOCK\s*\)', '', sql)
+    sql = re.sub(r'(?i)\s+\(NOLOCK\)', '', sql)
+    
+    # Remove TOP clause (but keep the rest of the SELECT)
+    sql = re.sub(r'(?i)\bTOP\s*\(\s*\d+\s*\)\s+', '', sql)
+    sql = re.sub(r'(?i)\bTOP\s+\d+\s+', '', sql)
+    
+    # Remove escape codes (like \x1b, \033, etc.)
+    sql = re.sub(r'\\x[0-9a-fA-F]{2}', '', sql)
+    sql = re.sub(r'\\[0-9]{3}', '', sql)
+    sql = re.sub(r'\\[a-zA-Z]', '', sql)
+    
+    # Remove ASCII control characters (except newline, tab, carriage return)
+    sql = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', sql)
+    
+    # Remove non-printable characters (but keep newlines, tabs, spaces, and common punctuation)
+    sql = re.sub(r'[^\x20-\x7E\n\r\t]', '', sql)
+    
+    # Normalize whitespace
+    # Replace multiple spaces/tabs with single space
+    sql = re.sub(r'[ \t]+', ' ', sql)
+    # Replace multiple newlines with single newline
+    sql = re.sub(r'\n{2,}', '\n', sql)
+    # Remove trailing whitespace from lines
+    sql = re.sub(r'[ \t]+$', '', sql, flags=re.MULTILINE)
+    # Remove leading/trailing whitespace
+    sql = sql.strip()
+    
+    return sql
 
 
 def build_alias_map(stmt: exp.Expression) -> dict:
@@ -362,8 +457,11 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None) -> list:
 
 def process_sql_file(filepath: Path, dialect: Optional[str] = None) -> list:
     """Process a single SQL file and return all table.column references (all occurrences)."""
-    with open(filepath, "r") as f:
+    with open(filepath, "r", encoding='utf-8', errors='ignore') as f:
         content = f.read()
+    
+    # Preprocess SQL to handle edge cases
+    content = preprocess_sql(content)
     
     return extract_table_columns(content, dialect)
 
