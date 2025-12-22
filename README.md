@@ -1,31 +1,41 @@
 # SQL Column Extractor
 
-Extract all `table.column` references from SQL files and output them to CSV or Excel format.
+Extract table.column references from SQL files and output to CSV/Excel format. Processes folders recursively and tracks which file each column reference comes from.
 
 ## Features
 
-- Extracts all table.column references from SQL files
-- Resolves table aliases to full table names (e.g., `e.employee_id` → `employees.employee_id`)
-- Resolves CTE aliases (e.g., `oh.level` → `org_hierarchy.level`)
-- Qualifies unqualified columns (e.g., `employee_id` → `employees.employee_id`)
-- Handles complex SQL: CTEs, subqueries, derived tables, recursive CTEs, UNIONs, JOINs
-- Outputs all occurrences (not just unique) - perfect for data dictionaries
-- Supports CSV and Excel output formats
+- Extracts fully qualified table.column references from SQL queries
+- Resolves table aliases to actual table names
+- Handles unqualified columns by inferring table names from context
+- Processes folders recursively (searches all subdirectories)
+- Supports complex SQL features:
+  - CTEs (Common Table Expressions)
+  - Subqueries and derived tables
+  - JOINs (INNER, LEFT, RIGHT, FULL OUTER)
+  - Window functions
+  - WHERE, HAVING, and JOIN conditions
+- Case-insensitive alias resolution
+- Preprocesses SQL to handle edge cases:
+  - Removes SQL comments
+  - Removes DDL statements (CREATE, ALTER, DROP)
+  - Removes DECLARE and SET statements
+  - Removes WITH (NOLOCK) hints
+  - Removes USE statements and GO statements
+  - Removes isolation levels and SET NOCOUNT
+  - Removes TOP clauses
+  - Normalizes whitespace
+  - Handles HTML entities and escape codes
 
 ## Installation
 
 ```bash
-pip install -r requirements.txt
-```
-
-Or install dependencies individually:
-```bash
 pip install sqlglot pandas openpyxl
 ```
 
-For better performance, install sqlglot with Rust tokenizer:
+Or install from requirements.txt:
+
 ```bash
-pip install "sqlglot[rs]" pandas openpyxl
+pip install -r requirements.txt
 ```
 
 ## Usage
@@ -33,106 +43,98 @@ pip install "sqlglot[rs]" pandas openpyxl
 ### Basic Usage
 
 ```bash
-# Extract from all SQL files in current directory
+# Process all SQL files in current directory (recursive)
 python extract_columns.py
 
-# Extract from specific file(s)
-python extract_columns.py file1.sql file2.sql
+# Process a specific folder (recursive)
+python extract_columns.py my_folder --output output.xlsx
 
-# Output to Excel
-python extract_columns.py --output columns.xlsx
+# Process specific files
+python extract_columns.py file1.sql file2.sql --output columns.csv
 
-# Custom dataset name
-python extract_columns.py --dataset "MyProject" --output columns.xlsx
-
-# Specify SQL dialect
-python extract_columns.py --dialect postgres --output columns.csv
+# Process folder and output to Excel
+python extract_columns.py sql_queries/ --output results.xlsx
 ```
+
+### Command Line Options
+
+- `files`: SQL files or directories to process (default: current directory)
+- `--output`, `-o`: Output file path (default: `columns.csv`)
+- `--dialect`, `-d`: SQL dialect (postgres, mysql, tsql, snowflake, etc.)
+- `--dataset`: Dataset name (default: "SQL_Parser", not used in current output format)
 
 ### Examples
 
 ```bash
-# Extract from single file
-python extract_columns.py queries.sql --output output.xlsx
+# Process current directory recursively
+python extract_columns.py
 
-# Extract from multiple files
-python extract_columns.py query1.sql query2.sql --output combined.xlsx
+# Process a folder and save to Excel
+python extract_columns.py ./sql_files --output results.xlsx
 
-# Use custom dataset name
-python extract_columns.py --dataset "Production" --output prod_columns.xlsx
+# Process with specific SQL dialect
+python extract_columns.py queries/ --dialect tsql --output output.csv
+
+# Process multiple folders/files
+python extract_columns.py folder1/ folder2/ file.sql --output combined.xlsx
 ```
 
 ## Output Format
 
 The script generates a CSV or Excel file with two columns:
 
-| Dataset | ColumnName |
-|---------|------------|
-| SQL_Parser | employees.employee_id |
-| SQL_Parser | employees.first_name |
-| SQL_Parser | customers.customer_id |
-| ... | ... |
+- **Filename**: Relative path to the SQL file where the column was found
+- **ColumnName**: Fully qualified table.column reference (e.g., `employees.employee_id`)
 
-- **Dataset**: The dataset name (configurable with `--dataset`)
-- **ColumnName**: The fully qualified table.column reference
+### Example Output
+
+| Filename | ColumnName |
+|----------|------------|
+| queries/users.sql | users.user_id |
+| queries/users.sql | users.email |
+| queries/orders.sql | orders.order_id |
+| queries/orders.sql | orders.user_id |
+| queries/orders.sql | orders.total |
+
+Each row represents one column reference occurrence. If the same column appears multiple times in a file, it will appear on multiple rows.
 
 ## How It Works
 
-1. Parses SQL using sqlglot to build an Abstract Syntax Tree (AST)
-2. Resolves aliases by mapping table aliases to their actual table/CTE names
-3. Qualifies columns by resolving unqualified columns to their source tables
-4. Extracts references by finding all column references in the AST
-5. Outputs results to CSV or Excel format
+1. **Preprocessing**: Removes comments, DDL statements, and other non-query SQL
+2. **Parsing**: Uses sqlglot to parse SQL into an Abstract Syntax Tree (AST)
+3. **Alias Resolution**: Builds a map of table aliases to actual table names
+4. **Column Extraction**: Traverses the AST to find all column references
+5. **Qualification**: Resolves unqualified columns to their source tables
+6. **Output**: Writes results to CSV or Excel format
 
 ## Supported SQL Features
 
-- Common Table Expressions (CTEs)
-- Recursive CTEs
-- Subqueries (correlated, scalar, EXISTS, IN, etc.)
-- Derived tables (subqueries in FROM clause)
+- SELECT statements with multiple tables
+- JOINs (INNER, LEFT, RIGHT, FULL OUTER, CROSS)
+- CTEs (WITH clauses)
+- Subqueries (scalar, correlated, EXISTS, IN)
+- Derived tables
 - Window functions
-- Complex JOINs (INNER, LEFT, RIGHT, FULL OUTER, CROSS, LATERAL)
-- UNION, INTERSECT, EXCEPT
-- Aggregations and GROUP BY
-- CASE expressions
-- Multiple SQL dialects (PostgreSQL, MySQL, Snowflake, BigQuery, etc.)
+- WHERE, HAVING, GROUP BY, ORDER BY clauses
+- UNION, INTERSECT, EXCEPT operations
 
-## Example
+## Limitations
 
-### Input SQL
-```sql
-WITH employee_data AS (
-    SELECT employee_id, first_name, salary
-    FROM employees
-    WHERE hire_date >= '2020-01-01'
-)
-SELECT e.employee_id, e.first_name
-FROM employee_data e
-WHERE e.salary > 50000;
-```
+- Unqualified columns in multi-table queries may not be resolved if the table cannot be determined from context
+- Some SQL dialects may require explicit `--dialect` specification
+- Very large SQL files may take longer to process
 
-### Output (Excel/CSV)
-```
-Dataset,ColumnName
-SQL_Parser,employees.employee_id
-SQL_Parser,employees.first_name
-SQL_Parser,employees.salary
-SQL_Parser,employees.hire_date
-SQL_Parser,employee_data.employee_id
-SQL_Parser,employee_data.first_name
-SQL_Parser,employee_data.salary
-```
+## Requirements
 
-Notice how:
-- `employee_id` (unqualified) → `employees.employee_id`
-- `e.employee_id` (alias) → `employee_data.employee_id` (CTE alias resolved)
+- Python 3.7+
+- sqlglot >= 24.0.0
+- pandas >= 2.0.0 (for Excel output)
+- openpyxl >= 3.0.0 (for Excel output)
 
 ## License
 
-MIT License - feel free to use this script for your projects!
+MIT License
 
-## Dependencies
+## Contributing
 
-- [sqlglot](https://github.com/tobymao/sqlglot) - SQL parser and transpiler
-- [pandas](https://pandas.pydata.org/) - Data manipulation (for Excel output)
-- [openpyxl](https://openpyxl.readthedocs.io/) - Excel file support
+Contributions are welcome! Please feel free to submit a Pull Request.
