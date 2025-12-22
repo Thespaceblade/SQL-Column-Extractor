@@ -263,70 +263,90 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None) -> list:
     """
     columns = []
     
-    try:
-        statements = sqlglot.parse(sql, dialect=dialect)
-        
-        for stmt in statements:
-            if stmt is None:
+    # If no dialect specified, try common dialects on parse failure
+    dialects_to_try = [dialect] if dialect else [None, 'tsql', 'mssql', 'postgres', 'mysql']
+    
+    last_error = None
+    for try_dialect in dialects_to_try:
+        try:
+            statements = sqlglot.parse(sql, dialect=try_dialect)
+            
+            # Check if parsing succeeded (at least one non-None statement)
+            if not statements or all(s is None for s in statements):
                 continue
             
-            # Build alias mapping for this statement
-            alias_map = build_alias_map(stmt)
-            
-            # Resolve unqualified columns to their source tables
-            unqualified_map = resolve_unqualified_columns(stmt, alias_map)
-            
-            # Find all column references
-            for col in stmt.find_all(exp.Column):
-                if col.name:
-                    # Get table name (either from column or from unqualified mapping)
-                    table_name = col.table
-                    
-                    # If column is unqualified, try to resolve it
-                    if not table_name and col.name in unqualified_map:
-                        table_name = unqualified_map[col.name]
-                    
-                    # Only include columns that have a table reference
-                    if not table_name:
+            for stmt in statements:
+                if stmt is None:
+                    continue
+                
+                # Build alias mapping for this statement
+                alias_map = build_alias_map(stmt)
+                
+                # Resolve unqualified columns to their source tables
+                unqualified_map = resolve_unqualified_columns(stmt, alias_map)
+                
+                # Find all column references
+                for col in stmt.find_all(exp.Column):
+                    if col.name:
+                        # Get table name (either from column or from unqualified mapping)
+                        table_name = col.table
+                        
+                        # If column is unqualified, try to resolve it
+                        if not table_name and col.name in unqualified_map:
+                            table_name = unqualified_map[col.name]
+                        
+                        # Only include columns that have a table reference
+                        if not table_name:
+                            # Skip columns without table reference
+                            continue
+                        
+                        # Build fully qualified name
+                        parts = []
+                        
+                        # Add catalog if present
+                        if col.catalog:
+                            parts.append(col.catalog)
+                        
+                        # Add database/schema if present
+                        if col.db:
+                            parts.append(col.db)
+                        
+                        # Resolve table alias to actual table name
+                        if table_name in alias_map:
+                            # Replace alias with actual table name
+                            actual_table = alias_map[table_name]
+                            # Split the actual table name and use its parts
+                            table_parts = actual_table.split('.')
+                            parts.extend(table_parts)
+                        else:
+                            # Use table name as-is if not in alias map
+                            parts.append(table_name)
+                        
+                        # Add column name
+                        parts.append(col.name)
+                        
+                        # Join with dots: schema.table.column or table.column
+                        # Must have at least table.column (2 parts minimum)
+                        if len(parts) >= 2:
+                            qualified_name = ".".join(parts)
+                            columns.append(qualified_name)
                         # Skip columns without table reference
-                        continue
-                    
-                    # Build fully qualified name
-                    parts = []
-                    
-                    # Add catalog if present
-                    if col.catalog:
-                        parts.append(col.catalog)
-                    
-                    # Add database/schema if present
-                    if col.db:
-                        parts.append(col.db)
-                    
-                    # Resolve table alias to actual table name
-                    if table_name in alias_map:
-                        # Replace alias with actual table name
-                        actual_table = alias_map[table_name]
-                        # Split the actual table name and use its parts
-                        table_parts = actual_table.split('.')
-                        parts.extend(table_parts)
-                    else:
-                        # Use table name as-is if not in alias map
-                        parts.append(table_name)
-                    
-                    # Add column name
-                    parts.append(col.name)
-                    
-                    # Join with dots: schema.table.column or table.column
-                    # Must have at least table.column (2 parts minimum)
-                    if len(parts) >= 2:
-                        qualified_name = ".".join(parts)
-                        columns.append(qualified_name)
-                    # Skip columns without table reference
+            
+            # If we got here, parsing succeeded
+            return columns
+            
+        except ParseError as e:
+            last_error = e
+            # Try next dialect
+            continue
+        except Exception as e:
+            last_error = e
+            # Try next dialect
+            continue
     
-    except ParseError as e:
-        print(f"Parse error: {e}", file=sys.stderr)
-    except Exception as e:
-        print(f"Error extracting columns: {e}", file=sys.stderr)
+    # If all dialects failed, print error
+    if last_error:
+        print(f"Parse error (tried dialects: {', '.join(str(d) for d in dialects_to_try if d)}): {last_error}", file=sys.stderr)
     
     return columns
 
