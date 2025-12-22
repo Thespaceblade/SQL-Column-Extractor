@@ -275,8 +275,15 @@ def resolve_unqualified_columns(stmt: exp.Expression, alias_map: dict) -> dict:
     """
     Build a mapping of unqualified column names to their source tables.
     Returns dict mapping column_name -> table_name for unqualified columns.
+    Now handles WHERE clauses and multiple tables by checking column context.
     """
     column_to_table = {}
+    
+    # Create case-insensitive alias map for lookups
+    case_insensitive_alias_map = {}
+    for key, value in alias_map.items():
+        case_insensitive_alias_map[key.lower()] = value
+        case_insensitive_alias_map[key] = value  # Keep original case too
     
     def get_tables_from_from_clause(select_stmt):
         """Get all table names from FROM and JOIN clauses."""
@@ -288,7 +295,7 @@ def resolve_unqualified_columns(stmt: exp.Expression, alias_map: dict) -> dict:
             if isinstance(from_expr, exp.From):
                 table_expr = from_expr.this
                 if isinstance(table_expr, exp.Table):
-                    table_name = table_expr.name
+                    table_name = table_expr.name if isinstance(table_expr.name, str) else str(table_expr.name)
                     if table_name:
                         # Resolve alias if present
                         alias = table_expr.alias
@@ -297,13 +304,16 @@ def resolve_unqualified_columns(stmt: exp.Expression, alias_map: dict) -> dict:
                                 alias_name = alias.this.name if isinstance(alias.this, exp.Identifier) else str(alias.this)
                             else:
                                 alias_name = str(alias)
-                            if alias_name in alias_map:
-                                tables.append(alias_map[alias_name])
+                            # Try case-insensitive lookup
+                            resolved = case_insensitive_alias_map.get(alias_name.lower()) or case_insensitive_alias_map.get(alias_name) or alias_map.get(alias_name)
+                            if resolved:
+                                tables.append(resolved)
                             else:
                                 tables.append(table_name)
                         else:
-                            if table_name in alias_map:
-                                tables.append(alias_map[table_name])
+                            resolved = case_insensitive_alias_map.get(table_name.lower()) or alias_map.get(table_name)
+                            if resolved:
+                                tables.append(resolved)
                             else:
                                 tables.append(table_name)
         
@@ -312,7 +322,7 @@ def resolve_unqualified_columns(stmt: exp.Expression, alias_map: dict) -> dict:
             if isinstance(join, exp.Join):
                 table_expr = join.this
                 if isinstance(table_expr, exp.Table):
-                    table_name = table_expr.name
+                    table_name = table_expr.name if isinstance(table_expr.name, str) else str(table_expr.name)
                     if table_name:
                         alias = table_expr.alias
                         if alias:
@@ -320,30 +330,79 @@ def resolve_unqualified_columns(stmt: exp.Expression, alias_map: dict) -> dict:
                                 alias_name = alias.this.name if isinstance(alias.this, exp.Identifier) else str(alias.this)
                             else:
                                 alias_name = str(alias)
-                            if alias_name in alias_map:
-                                tables.append(alias_map[alias_name])
+                            resolved = case_insensitive_alias_map.get(alias_name.lower()) or case_insensitive_alias_map.get(alias_name) or alias_map.get(alias_name)
+                            if resolved:
+                                tables.append(resolved)
                             else:
                                 tables.append(table_name)
                         else:
-                            if table_name in alias_map:
-                                tables.append(alias_map[table_name])
+                            resolved = case_insensitive_alias_map.get(table_name.lower()) or alias_map.get(table_name)
+                            if resolved:
+                                tables.append(resolved)
                             else:
                                 tables.append(table_name)
         
         return tables
     
-    # For each SELECT statement, map unqualified columns to their source tables
-    for select_stmt in stmt.find_all(exp.Select):
+    def find_column_source_table(column_name, select_stmt, alias_map, case_insensitive_alias_map):
+        """
+        Try to determine which table a column belongs to by checking:
+        1. If there's exactly one table, use it
+        2. If column appears in JOIN conditions, use the table from that JOIN
+        3. If column appears in WHERE with table prefix in same expression, use that table
+        """
         tables = get_tables_from_from_clause(select_stmt)
         
-        # If there's exactly one table, we can map unqualified columns to it
+        # Case 1: Single table - easy
         if len(tables) == 1:
-            source_table = tables[0]
-            # Find unqualified columns in this SELECT
-            for col in select_stmt.find_all(exp.Column):
-                if col.name and not col.table:
-                    # This is an unqualified column - map it to the source table
-                    column_to_table[col.name] = source_table
+            return tables[0]
+        
+        # Case 2: Check JOIN conditions for this column
+        for join in select_stmt.args.get("joins", []):
+            if isinstance(join, exp.Join):
+                # Check if this column appears in the JOIN condition
+                join_condition = join.args.get("on") or join.args.get("using")
+                if join_condition:
+                    for col in join_condition.find_all(exp.Column):
+                        if col.name:
+                            col_name = col.name if isinstance(col.name, str) else str(col.name)
+                            if col_name.lower() == column_name.lower():
+                                if col.table:
+                                    # Column has table prefix in JOIN
+                                    table_ref = col.table if isinstance(col.table, str) else str(col.table)
+                                    resolved = case_insensitive_alias_map.get(table_ref.lower()) or alias_map.get(table_ref)
+                                    if resolved:
+                                        return resolved
+                                    return table_ref
+        
+        # Case 3: Check if column appears with table prefix elsewhere in WHERE/HAVING
+        where_clause = select_stmt.args.get("where")
+        if where_clause:
+            for col in where_clause.find_all(exp.Column):
+                if col.name:
+                    col_name = col.name if isinstance(col.name, str) else str(col.name)
+                    if col_name.lower() == column_name.lower() and col.table:
+                        table_ref = col.table if isinstance(col.table, str) else str(col.table)
+                        resolved = case_insensitive_alias_map.get(table_ref.lower()) or alias_map.get(table_ref)
+                        if resolved:
+                            return resolved
+                        return table_ref
+        
+        # Case 4: If we can't determine, return None (will skip this column)
+        return None
+    
+    # Process all SELECT statements
+    for select_stmt in stmt.find_all(exp.Select):
+        # Find all unqualified columns in this SELECT (including WHERE, JOIN, HAVING, etc.)
+        for col in select_stmt.find_all(exp.Column):
+            if col.name and not col.table:
+                column_name = col.name if isinstance(col.name, str) else str(col.name)
+                # Try to find source table using improved logic
+                source_table = find_column_source_table(column_name, select_stmt, alias_map, case_insensitive_alias_map)
+                if source_table:
+                    # Use case-insensitive key for lookup
+                    column_to_table[column_name.lower()] = source_table
+                    column_to_table[column_name] = source_table  # Keep original case too
     
     return column_to_table
 
@@ -381,18 +440,28 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None) -> list:
                     # Build alias mapping for this statement
                     alias_map = build_alias_map(stmt)
                     
+                    # Create case-insensitive alias map
+                    case_insensitive_alias_map = {}
+                    for key, value in alias_map.items():
+                        case_insensitive_alias_map[key.lower()] = value
+                    
                     # Resolve unqualified columns to their source tables
                     unqualified_map = resolve_unqualified_columns(stmt, alias_map)
                     
-                    # Find all column references
+                    # Find all column references (including WHERE, JOIN, HAVING, etc.)
                     for col in stmt.find_all(exp.Column):
                         if col.name:
                             # Get table name (either from column or from unqualified mapping)
                             table_name = col.table
+                            if table_name and not isinstance(table_name, str):
+                                table_name = str(table_name)
                             
-                            # If column is unqualified, try to resolve it
-                            if not table_name and col.name in unqualified_map:
-                                table_name = unqualified_map[col.name]
+                            # If column is unqualified, try to resolve it (case-insensitive)
+                            if not table_name:
+                                col_name = col.name if isinstance(col.name, str) else str(col.name)
+                                # Try case-insensitive lookup
+                                table_name = (unqualified_map.get(col_name) or 
+                                            unqualified_map.get(col_name.lower()))
                             
                             # Only include columns that have a table reference
                             if not table_name:
@@ -404,25 +473,30 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None) -> list:
                             
                             # Add catalog if present
                             if col.catalog:
-                                parts.append(col.catalog)
+                                parts.append(col.catalog if isinstance(col.catalog, str) else str(col.catalog))
                             
                             # Add database/schema if present
                             if col.db:
-                                parts.append(col.db)
+                                parts.append(col.db if isinstance(col.db, str) else str(col.db))
                             
-                            # Resolve table alias to actual table name
-                            if table_name in alias_map:
+                            # Resolve table alias to actual table name (case-insensitive)
+                            table_name_str = table_name if isinstance(table_name, str) else str(table_name)
+                            resolved_table = (case_insensitive_alias_map.get(table_name_str.lower()) or 
+                                             alias_map.get(table_name_str))
+                            
+                            if resolved_table:
                                 # Replace alias with actual table name
-                                actual_table = alias_map[table_name]
+                                actual_table = resolved_table
                                 # Split the actual table name and use its parts
                                 table_parts = actual_table.split('.')
                                 parts.extend(table_parts)
                             else:
                                 # Use table name as-is if not in alias map
-                                parts.append(table_name)
+                                parts.append(table_name_str)
                             
                             # Add column name
-                            parts.append(col.name)
+                            col_name = col.name if isinstance(col.name, str) else str(col.name)
+                            parts.append(col_name)
                             
                             # Join with dots: schema.table.column or table.column
                             # Must have at least table.column (2 parts minimum)
