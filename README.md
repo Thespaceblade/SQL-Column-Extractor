@@ -31,12 +31,20 @@ Extract table.column references from SQL files and output to CSV/Excel format. P
   - Removes isolation levels and SET NOCOUNT
   - Removes TOP clauses
   - Normalizes whitespace
-  - Handles HTML entities and escape codes
+  - Decodes HTML entities (`&gt;`, `&lt;`, `&#60;`, `&#62;`, etc.) to actual symbols
+  - Decodes URL-encoded characters (`%3E`, `%3C`, `%26`, etc.)
+  - Removes ANSI escape codes and Unicode control characters
+- Hybrid parsing strategy:
+  - Primary: Strict AST parsing using sqlglot for accurate column extraction
+  - Fallback: Tolerant parsing using sqlparse + regex when AST parsing fails
+  - Automatic fallback ensures maximum column extraction even from malformed SQL
+- RDL-aware filename filtering: Automatically skips files matching RDL patterns (SOR_DATA, SOR_REFRESH, etc.)
+- Default dialect: Uses `tsql` (SQL Server) as default if no dialect specified
 
 ## Installation
 
 ```bash
-pip install sqlglot pandas openpyxl
+pip install sqlglot pandas openpyxl sqlparse
 ```
 
 Or install from requirements.txt:
@@ -44,6 +52,8 @@ Or install from requirements.txt:
 ```bash
 pip install -r requirements.txt
 ```
+
+**Note**: `sqlparse` is optional but recommended for fallback parsing when sqlglot fails. The script will work without it but with reduced robustness.
 
 ## Usage
 
@@ -70,7 +80,14 @@ python extract_columns.py sql_queries/ --output results.xlsx
   - If a file path: Creates parent directory and uses that filename
   - If a directory: Creates CSV file named `columns.csv` in that directory
   - If not specified: Creates `output/` directory in current location
-- `--dialect`, `-d`: SQL dialect (postgres, mysql, tsql, snowflake, oracle, etc.)
+- `--dialect`, `-d`: SQL dialect (default: `tsql` for SQL Server)
+  - Supported: `tsql`/`mssql` (SQL Server), `postgres`, `mysql`, `snowflake`, `oracle`, `bigquery`
+  - Note: `mssql`, `sqlserver`, `sql-server`, `t-sql` are automatically normalized to `tsql`
+- `--try-multiple-dialects`: Try multiple dialects on parse failure (default: only try specified dialect or tsql)
+  - When enabled, attempts: `tsql`, `postgres`, `mysql`, `snowflake`, `oracle`, `bigquery`
+- `--no-unqualified-resolution`: Disable inference of table names for unqualified columns
+  - By default, the script attempts to resolve unqualified columns (e.g., `id`) to their source tables
+  - Use this flag to disable this behavior and only extract fully qualified columns
 - `--dataset`: Dataset name (legacy option, not used - Dataset is extracted from filename)
 
 ### Examples
@@ -87,6 +104,12 @@ python extract_columns.py queries/ --dialect tsql --output output.csv
 
 # Process multiple folders/files
 python extract_columns.py folder1/ folder2/ file.sql --output combined.xlsx
+
+# Try multiple dialects if parsing fails
+python extract_columns.py queries/ --try-multiple-dialects --output output.csv
+
+# Disable unqualified column resolution
+python extract_columns.py queries/ --no-unqualified-resolution --output output.csv
 ```
 
 ## Output Structure
@@ -100,10 +123,19 @@ The script creates an `output/` folder (or uses the specified output directory) 
 
 ### Error Handling
 
-Files that cannot be parsed correctly or find 0 columns are:
+The script uses a hybrid parsing approach with status codes:
+
+- **SUCCESS**: AST parsing succeeded and columns were extracted
+- **PARTIAL_OK**: AST parsing failed, but fallback parsing successfully extracted columns (treated as success, file not copied to Error_Reports)
+- **PARSE_ERROR**: Both AST and fallback parsing failed (file copied to Error_Reports)
+- **ZERO_COLUMNS**: Parsing succeeded but no columns were found (file copied to Error_Reports)
+
+Files with `PARSE_ERROR` or `ZERO_COLUMNS` status are:
 - Copied (not moved) to `Error_Reports/` subfolder
 - Logged with full details
 - Added to `errors.txt` report with detailed error information
+
+Files with `PARTIAL_OK` status are treated as successful and are not copied to Error_Reports.
 
 The `errors.txt` file includes comprehensive error details:
 - **Parse errors** with line numbers and column positions
@@ -202,16 +234,24 @@ simple_query,Default,users.name
 
 ## How It Works
 
-1. **Preprocessing**: Removes comments, DDL statements, and other non-query SQL
-2. **Parsing**: Uses sqlglot to parse SQL into an Abstract Syntax Tree (AST)
-3. **Alias Resolution**: Builds a map of table aliases to actual table names
-4. **Column Extraction**: Traverses the AST to find all column references
-5. **Qualification**: Resolves unqualified columns to their source tables
-6. **Filename Parsing**: Extracts Report Name and Dataset from SQL filename
-7. **Deduplication**: Removes duplicate columns within each file (keeps unique per file)
-8. **Error Tracking**: Copies problematic files to `Error_Reports/` and logs details
-9. **Output**: Writes results to CSV or Excel format with ReportName, Dataset, ColumnName columns
-10. **Error Reporting**: Generates comprehensive error report in `errors.txt`
+1. **Preprocessing**: 
+   - Decodes HTML entities (`&gt;` → `>`, `&lt;` → `<`, etc.)
+   - Decodes URL-encoded characters (`%3E` → `>`, etc.)
+   - Removes ANSI escape codes and Unicode control characters
+   - Removes comments, DDL statements, and other non-query SQL
+   - Normalizes whitespace
+2. **RDL File Filtering**: Skips files matching RDL patterns (SOR_DATA, SOR_REFRESH, etc.)
+3. **Hybrid Parsing**:
+   - **Primary**: Attempts strict AST parsing using sqlglot
+   - **Fallback**: If AST parsing fails or finds 0 columns, uses tolerant sqlparse + regex parsing
+4. **Alias Resolution**: Builds a map of table aliases to actual table names (case-insensitive)
+5. **Column Extraction**: Traverses the AST to find all column references
+6. **Qualification**: Resolves unqualified columns to their source tables (unless `--no-unqualified-resolution` is used)
+7. **Filename Parsing**: Extracts Report Name and Dataset from SQL filename
+8. **Deduplication**: Removes duplicate columns within each file (keeps unique per file)
+9. **Error Tracking**: Copies problematic files (`PARSE_ERROR`, `ZERO_COLUMNS`) to `Error_Reports/` and logs details
+10. **Output**: Writes results to CSV or Excel format with ReportName, Dataset, ColumnName columns
+11. **Error Reporting**: Generates comprehensive error report in `errors.txt`
 
 ## Supported SQL Features
 
@@ -263,18 +303,20 @@ When a SQL file fails to parse, the error message includes:
 
 ## Limitations
 
-- Unqualified columns in multi-table queries may not be resolved if the table cannot be determined from context
-- Some SQL dialects may require explicit `--dialect` specification
+- Unqualified columns in multi-table queries may not be resolved if the table cannot be determined from context (use `--no-unqualified-resolution` to disable this feature)
+- Some SQL dialects may require explicit `--dialect` specification (defaults to `tsql`)
 - Very large SQL files may take longer to process
-- Files with errors are copied (not moved) to Error_Reports for review
+- Files with `PARSE_ERROR` or `ZERO_COLUMNS` status are copied (not moved) to Error_Reports for review
 - Dynamic SQL (EXEC with string literals) cannot be statically analyzed
+- Fallback parsing (PARTIAL_OK) may extract columns with less accuracy than AST parsing, but provides better coverage for malformed SQL
 
 ## Requirements
 
 - Python 3.7+
-- sqlglot >= 24.0.0
+- sqlglot >= 24.0.0 (required)
 - pandas >= 2.0.0 (for Excel output)
 - openpyxl >= 3.0.0 (for Excel output)
+- sqlparse >= 0.4.0 (optional, recommended for fallback parsing)
 
 ## License
 
