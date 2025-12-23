@@ -2,10 +2,15 @@
 """
 Extract table.column references from SQL files and output to CSV/Excel format.
 
-Usage:
-    python extract_columns.py                    # Extract from all SQL files
+EASIEST WAY TO USE:
+    1. Open this file and find the FOLDER_PATH variable near the top
+    2. Paste your folder path there (e.g., FOLDER_PATH = "/path/to/your/sql/files")
+    3. Run: python extract_columns.py
+
+ALTERNATIVE USAGE:
+    python extract_columns.py                    # Extract from all SQL files in current directory
     python extract_columns.py 01_simple_ctes.sql  # Extract from specific file
-    python extract_columns.py --output columns.csv  # Output to CSV
+    python extract_columns.py folder/ --output columns.csv  # Process folder, output to CSV
     python extract_columns.py --output columns.xlsx  # Output to Excel
 """
 
@@ -13,9 +18,11 @@ import sys
 import csv
 import re
 import html
+import logging
 from pathlib import Path
 from typing import Optional
 from collections import defaultdict
+from datetime import datetime
 
 # Import sqlglot (install with: pip install sqlglot or pip install "sqlglot[rs]")
 try:
@@ -27,6 +34,19 @@ except ImportError:
     print("Install with: pip install sqlglot")
     print("Or for better performance: pip install 'sqlglot[rs]'")
     sys.exit(1)
+
+
+# ============================================================================
+# CONFIGURATION: Paste your folder path here
+# ============================================================================
+# Paste the full path to your SQL files folder here, or leave empty to use
+# command-line arguments or process current directory
+# Examples:
+#   FOLDER_PATH = "/Users/username/Documents/SQL_Queries"
+#   FOLDER_PATH = r"C:\Users\username\Documents\SQL_Queries"  # Windows
+#   FOLDER_PATH = ""  # Leave empty to use command-line args or current directory
+# ============================================================================
+FOLDER_PATH = ""
 
 
 def preprocess_sql(sql: str) -> str:
@@ -507,11 +527,15 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None) -> list:
                             # Must have at least table.column (2 parts minimum)
                             if len(parts) >= 2:
                                 qualified_name = ".".join(parts)
+                                # Filter out wildcard columns (table.*)
+                                if qualified_name.endswith('.*'):
+                                    continue
                                 columns.append(qualified_name)
                             # Skip columns without table reference
                 
                 except Exception as e:
                     # Skip this statement but continue with others
+                    # Note: logger might not be available here, so use print
                     print(f"Warning: Skipped statement {i+1} due to error: {e}", file=sys.stderr)
                     continue
             
@@ -530,6 +554,7 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None) -> list:
     
     # If all dialects failed, print error but don't fail completely
     if last_error:
+        # Note: logger might not be available here, so use print
         print(f"Warning: Parse error (tried dialects: {', '.join(str(d) for d in dialects_to_try if d)}): {last_error}", file=sys.stderr)
         print("Attempting to extract columns from successfully parsed statements...", file=sys.stderr)
     
@@ -545,6 +570,23 @@ def process_sql_file(filepath: Path, dialect: Optional[str] = None) -> list:
     content = preprocess_sql(content)
     
     return extract_table_columns(content, dialect)
+
+
+def setup_logging(log_file: Path):
+    """Setup logging to both file and console."""
+    # Create log file path
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file, encoding='utf-8'),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    return logging.getLogger(__name__)
 
 
 def main():
@@ -578,15 +620,70 @@ def main():
     
     args = parser.parse_args()
     
+    # Determine output file name early (for logging setup)
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        # Default to columns.csv in current directory
+        output_path = Path("columns.csv")
+    
+    # Setup logging (log file will be created alongside CSV/Excel)
+    log_file = output_path.with_suffix('.log')
+    logger = setup_logging(log_file)
+    
+    logger.info("="*80)
+    logger.info("SQL Column Extractor - Starting")
+    logger.info("="*80)
+    logger.info(f"Output file: {output_path.absolute()}")
+    logger.info(f"Log file: {log_file.absolute()}")
+    
     # Determine which files to process
     sql_files = []
     
-    if args.files:
-        # Process provided files/directories
+    # Check if FOLDER_PATH is set (highest priority)
+    if FOLDER_PATH and FOLDER_PATH.strip():
+        folder_path = Path(FOLDER_PATH.strip())
+        if not folder_path.exists():
+            error_msg = f"FOLDER_PATH not found: {folder_path}"
+            logger.error(error_msg)
+            logger.error("Please check the FOLDER_PATH variable at the top of the script.")
+            print(f"Error: {error_msg}", file=sys.stderr)
+            print("Please check the FOLDER_PATH variable at the top of the script.", file=sys.stderr)
+            return
+        
+        if folder_path.is_file():
+            # Single file
+            if folder_path.suffix.lower() == '.sql':
+                sql_files.append(folder_path)
+                logger.info(f"Using FOLDER_PATH (file): {folder_path}")
+                print(f"Using FOLDER_PATH: {folder_path}")
+            else:
+                error_msg = f"FOLDER_PATH is not a SQL file: {folder_path}"
+                logger.error(error_msg)
+                print(f"Error: {error_msg}", file=sys.stderr)
+                return
+        elif folder_path.is_dir():
+            # Directory - find all SQL files recursively
+            found_files = sorted(folder_path.rglob("*.sql"))
+            sql_files.extend(found_files)
+            logger.info(f"Using FOLDER_PATH (directory): {folder_path}")
+            logger.info(f"Found {len(found_files)} SQL file(s)")
+            print(f"Using FOLDER_PATH: {folder_path}")
+            print(f"Found {len(found_files)} SQL file(s) in {folder_path}")
+        else:
+            error_msg = f"FOLDER_PATH is not a valid file or directory: {folder_path}"
+            logger.error(error_msg)
+            print(f"Error: {error_msg}", file=sys.stderr)
+            return
+    
+    elif args.files:
+        # Process provided files/directories from command-line
         for file_path in args.files:
             path = Path(file_path)
             if not path.exists():
-                print(f"Warning: Path not found: {path}", file=sys.stderr)
+                warning_msg = f"Path not found: {path}"
+                logger.warning(warning_msg)
+                print(f"Warning: {warning_msg}", file=sys.stderr)
                 continue
             
             if path.is_file():
@@ -594,40 +691,69 @@ def main():
                 if path.suffix.lower() == '.sql':
                     sql_files.append(path)
                 else:
-                    print(f"Warning: Skipping non-SQL file: {path}", file=sys.stderr)
+                    warning_msg = f"Skipping non-SQL file: {path}"
+                    logger.warning(warning_msg)
+                    print(f"Warning: {warning_msg}", file=sys.stderr)
             elif path.is_dir():
                 # Directory - find all SQL files recursively
                 found_files = sorted(path.rglob("*.sql"))
                 sql_files.extend(found_files)
+                logger.info(f"Found {len(found_files)} SQL file(s) in {path}")
                 print(f"Found {len(found_files)} SQL file(s) in {path}")
     else:
         # Default to current directory (recursive)
         sql_files = sorted(Path.cwd().rglob("*.sql"))
+        logger.info(f"Using current directory: {Path.cwd()}")
     
     if not sql_files:
-        print("No SQL files found to process.")
+        error_msg = "No SQL files found to process."
+        logger.error(error_msg)
+        print(error_msg)
         return
     
     # Collect all column references with file tracking
     # Structure: list of tuples (filename, column_name)
+    # We'll deduplicate per file (keep unique columns per file)
     column_data = []
     file_columns = {}
     
+    logger.info(f"\nProcessing {len(sql_files)} SQL file(s)...")
     print(f"\nProcessing {len(sql_files)} SQL file(s)...")
     
     for sql_file in sql_files:
+        logger.info(f"Processing: {sql_file}")
         print(f"  Processing: {sql_file}")
         try:
             columns = process_sql_file(sql_file, args.dialect)
             # Store full relative path or just filename
             file_key = str(sql_file.relative_to(Path.cwd())) if sql_file.is_relative_to(Path.cwd()) else str(sql_file)
-            file_columns[file_key] = columns
             
-            # Add each column with its source file
+            # Filter out wildcard columns (table.*) and deduplicate per file
+            # Keep only unique columns per file (can have duplicates across files)
+            unique_columns_for_file = []
+            seen_in_file = set()
+            
             for col in columns:
+                # Skip wildcard columns (table.*)
+                if col.endswith('.*'):
+                    logger.debug(f"Skipping wildcard column: {col}")
+                    continue
+                # Deduplicate within this file
+                if col not in seen_in_file:
+                    seen_in_file.add(col)
+                    unique_columns_for_file.append(col)
+            
+            file_columns[file_key] = unique_columns_for_file
+            
+            # Add each unique column with its source file
+            for col in unique_columns_for_file:
                 column_data.append((file_key, col))
+            
+            logger.info(f"  Found {len(unique_columns_for_file)} unique columns in {file_key}")
         except Exception as e:
-            print(f"  Error processing {sql_file}: {e}", file=sys.stderr)
+            error_msg = f"Error processing {sql_file}: {e}"
+            logger.error(error_msg, exc_info=True)
+            print(f"  {error_msg}", file=sys.stderr)
             continue
     
     # Count unique vs total
@@ -636,15 +762,10 @@ def main():
     total_count = len(column_data)
     unique_count = len(unique_columns)
     
+    logger.info(f"\nFound {total_count} total table.column references ({unique_count} unique)")
+    logger.info(f"Across {len(file_columns)} file(s)")
     print(f"\nFound {total_count} total table.column references ({unique_count} unique)")
     print(f"Across {len(file_columns)} file(s)")
-    
-    # Determine output file name
-    if args.output:
-        output_path = Path(args.output)
-    else:
-        # Default to columns.csv in current directory
-        output_path = Path("columns.csv")
     
     # Output to CSV or Excel
     
@@ -660,15 +781,30 @@ def main():
             })
             
             df.to_excel(output_path, index=False)
-            print(f"\n✓ Output written to: {output_path}")
-            print(f"  Rows: {len(df)} (all occurrences)")
+            abs_path = output_path.absolute()
+            logger.info(f"Excel output written successfully: {abs_path}")
+            logger.info(f"  Rows: {len(df)} (unique columns per file)")
+            logger.info(f"  Columns: Filename, ColumnName")
+            print("\n" + "="*80)
+            print("OUTPUT FILE LOCATION:")
+            print("="*80)
+            print(f"  {abs_path}")
+            print("="*80)
+            print(f"\n✓ Output written to: {abs_path}")
+            print(f"  Rows: {len(df)} (unique columns per file)")
             print(f"  Columns: Filename, ColumnName")
+            print(f"  Log file: {log_file.absolute()}")
             
         except ImportError:
+            error_msg = "pandas and openpyxl required for Excel output"
+            logger.warning(error_msg)
+            logger.warning("Falling back to CSV output...")
             print("\nError: pandas and openpyxl required for Excel output.")
             print("Install with: pip install pandas openpyxl")
             print("\nFalling back to CSV output...")
             output_path = output_path.with_suffix('.csv')
+            # Update log file path if we changed output path
+            log_file = output_path.with_suffix('.log')
     
     if output_path.suffix.lower() == '.csv':
         # CSV output
@@ -679,26 +815,52 @@ def main():
             for filename, col in column_data:
                 writer.writerow([filename, col])
         
-        print(f"\n✓ Output written to: {output_path}")
-        print(f"  Rows: {len(column_data)} (all occurrences)")
+        abs_path = output_path.absolute()
+        logger.info(f"CSV output written successfully: {abs_path}")
+        logger.info(f"  Rows: {len(column_data)} (unique columns per file)")
+        logger.info(f"  Columns: Filename, ColumnName")
+        print("\n" + "="*80)
+        print("OUTPUT FILE LOCATION:")
+        print("="*80)
+        print(f"  {abs_path}")
+        print("="*80)
+        print(f"\n✓ Output written to: {abs_path}")
+        print(f"  Rows: {len(column_data)} (unique columns per file)")
         print(f"  Columns: Filename, ColumnName")
+        print(f"  Log file: {log_file.absolute()}")
     
     # Show summary by file
+    logger.info("\n" + "="*60)
+    logger.info("SUMMARY BY FILE")
+    logger.info("="*60)
     print("\n" + "="*60)
     print("SUMMARY BY FILE")
     print("="*60)
     for filename, cols in sorted(file_columns.items()):
         unique_in_file = len(set(cols))
-        print(f"  {filename}: {len(cols)} total references ({unique_in_file} unique)")
+        summary_line = f"  {filename}: {len(cols)} unique columns"
+        logger.info(summary_line)
+        print(summary_line)
     
     # Show sample of extracted columns
+    logger.info("\n" + "="*60)
+    logger.info("SAMPLE OUTPUT (first 20 rows)")
+    logger.info("="*60)
     print("\n" + "="*60)
     print("SAMPLE OUTPUT (first 20 rows)")
     print("="*60)
     for filename, col in column_data[:20]:
-        print(f"  {filename} | {col}")
+        sample_line = f"  {filename} | {col}"
+        logger.info(sample_line)
+        print(sample_line)
     if len(column_data) > 20:
-        print(f"  ... and {len(column_data) - 20} more rows")
+        remaining_msg = f"  ... and {len(column_data) - 20} more rows"
+        logger.info(remaining_msg)
+        print(remaining_msg)
+    
+    logger.info("="*80)
+    logger.info("SQL Column Extractor - Completed Successfully")
+    logger.info("="*80)
 
 
 if __name__ == "__main__":
