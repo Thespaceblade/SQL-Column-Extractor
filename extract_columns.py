@@ -979,16 +979,16 @@ def process_sql_file(filepath: Path, dialect: Optional[str] = None, error_detail
         List of table.column references
     """
     try:
-    with open(filepath, "r", encoding='utf-8', errors='ignore') as f:
-        content = f.read()
-    
+        with open(filepath, "r", encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        
         if not content.strip():
             print(f"Warning: File {filepath} is empty", file=sys.stderr)
             return []
-    
-    # Preprocess SQL to handle edge cases
-    content = preprocess_sql(content)
-    
+        
+        # Preprocess SQL to handle edge cases
+        content = preprocess_sql(content)
+        
         if not content.strip():
             print(f"Warning: File {filepath} contains only comments/DDL (no query statements)", file=sys.stderr)
             return []
