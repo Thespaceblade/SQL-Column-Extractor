@@ -980,13 +980,17 @@ def main():
             # Track files with zero columns
             if len(unique_columns_for_file) == 0:
                 import shutil
-                files_with_zero_columns.append({
+                zero_col_info = {
                     'file': file_key,
                     'report_name': report_name,
                     'dataset': dataset,
                     'total_extracted': len(columns),
                     'wildcards_filtered': wildcard_count
-                })
+                }
+                # Add parse errors if available (file failed to parse)
+                if file_error_details:
+                    zero_col_info['parse_errors'] = file_error_details
+                files_with_zero_columns.append(zero_col_info)
                 logger.warning(f"  No unique columns found in {report_name} ({dataset}) - Total extracted: {len(columns)}, Wildcards filtered: {wildcard_count}")
                 
                 # Copy file with zero columns to Error_Reports directory
@@ -1237,6 +1241,22 @@ def main():
                             f.write(f"(wildcards: {file_info['wildcards_filtered']})\n")
                         else:
                             f.write(f"Reason: No columns extracted (may be DDL-only or parse error)\n")
+                        
+                        # Write detailed parse errors if available
+                        if 'parse_errors' in file_info and file_info['parse_errors']:
+                            f.write(f"\nDetailed Parse Errors:\n")
+                            for parse_error in file_info['parse_errors']:
+                                f.write(f"\n  Statement #{parse_error.get('statement', 'unknown')}\n")
+                                f.write(f"  Dialect: {parse_error.get('dialect', 'unknown')}\n")
+                                if 'dialects_tried' in parse_error:
+                                    f.write(f"  Dialects tried: {parse_error['dialects_tried']}\n")
+                                f.write(f"  Error: {parse_error.get('error', 'Unknown error')}\n")
+                                f.write(f"\n  Detailed Error Information:\n")
+                                # Indent the formatted error
+                                formatted = parse_error.get('formatted', '')
+                                for line in formatted.split('\n'):
+                                    f.write(f"    {line}\n")
+                        
                         f.write("-"*80 + "\n")
                     f.write("\n")
                 
