@@ -49,6 +49,39 @@ except ImportError:
 FOLDER_PATH = ""
 
 
+def parse_filename(filepath: Path) -> tuple[str, str]:
+    """
+    Parse filename to extract Report Name and Dataset.
+    
+    Format: <report_name>__<dataset>.sql
+    If no double underscore, Dataset defaults to "Default"
+    
+    Args:
+        filepath: Path object to the SQL file
+        
+    Returns:
+        tuple: (report_name, dataset)
+    """
+    # Get just the filename (no path)
+    filename = filepath.name
+    
+    # Remove .sql extension
+    if filename.lower().endswith('.sql'):
+        filename = filename[:-4]
+    
+    # Split by double underscore
+    if '__' in filename:
+        parts = filename.split('__', 1)  # Split on first occurrence only
+        report_name = parts[0]
+        dataset = parts[1] if len(parts) > 1 else "Default"
+    else:
+        # No double underscore - entire filename is report name
+        report_name = filename
+        dataset = "Default"
+    
+    return report_name, dataset
+
+
 def preprocess_sql(sql: str) -> str:
     """
     Preprocess SQL to handle edge cases and remove problematic syntax.
@@ -725,7 +758,12 @@ def main():
         print(f"  Processing: {sql_file}")
         try:
             columns = process_sql_file(sql_file, args.dialect)
-            # Store full relative path or just filename
+            
+            # Parse filename to get report name and dataset
+            report_name, dataset = parse_filename(sql_file)
+            logger.info(f"  Parsed: Report='{report_name}', Dataset='{dataset}'")
+            
+            # Store full relative path or just filename for file_columns tracking
             file_key = str(sql_file.relative_to(Path.cwd())) if sql_file.is_relative_to(Path.cwd()) else str(sql_file)
             
             # Filter out wildcard columns (table.*) and deduplicate per file
@@ -745,11 +783,11 @@ def main():
             
             file_columns[file_key] = unique_columns_for_file
             
-            # Add each unique column with its source file
+            # Add each unique column with parsed report name and dataset
             for col in unique_columns_for_file:
-                column_data.append((file_key, col))
+                column_data.append((report_name, dataset, col))
             
-            logger.info(f"  Found {len(unique_columns_for_file)} unique columns in {file_key}")
+            logger.info(f"  Found {len(unique_columns_for_file)} unique columns in {report_name} ({dataset})")
         except Exception as e:
             error_msg = f"Error processing {sql_file}: {e}"
             logger.error(error_msg, exc_info=True)
@@ -757,7 +795,7 @@ def main():
             continue
     
     # Count unique vs total
-    all_columns = [col for _, col in column_data]
+    all_columns = [col for _, _, col in column_data]
     unique_columns = sorted(set(all_columns))
     total_count = len(column_data)
     unique_count = len(unique_columns)
@@ -774,17 +812,18 @@ def main():
         try:
             import pandas as pd
             
-            # Create DataFrame with Filename and ColumnName
+            # Create DataFrame with ReportName, Dataset, and ColumnName
             df = pd.DataFrame({
-                'Filename': [filename for filename, _ in column_data],
-                'ColumnName': [col for _, col in column_data]
+                'ReportName': [report for report, _, _ in column_data],
+                'Dataset': [dataset for _, dataset, _ in column_data],
+                'ColumnName': [col for _, _, col in column_data]
             })
             
             df.to_excel(output_path, index=False)
             abs_path = output_path.absolute()
             logger.info(f"Excel output written successfully: {abs_path}")
             logger.info(f"  Rows: {len(df)} (unique columns per file)")
-            logger.info(f"  Columns: Filename, ColumnName")
+            logger.info(f"  Columns: ReportName, Dataset, ColumnName")
             print("\n" + "="*80)
             print("OUTPUT FILE LOCATION:")
             print("="*80)
@@ -792,7 +831,7 @@ def main():
             print("="*80)
             print(f"\n✓ Output written to: {abs_path}")
             print(f"  Rows: {len(df)} (unique columns per file)")
-            print(f"  Columns: Filename, ColumnName")
+            print(f"  Columns: ReportName, Dataset, ColumnName")
             print(f"  Log file: {log_file.absolute()}")
             
         except ImportError:
@@ -810,15 +849,15 @@ def main():
         # CSV output
         with open(output_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(['Filename', 'ColumnName'])  # Header
+            writer.writerow(['ReportName', 'Dataset', 'ColumnName'])  # Header
             
-            for filename, col in column_data:
-                writer.writerow([filename, col])
+            for report_name, dataset, col in column_data:
+                writer.writerow([report_name, dataset, col])
         
         abs_path = output_path.absolute()
         logger.info(f"CSV output written successfully: {abs_path}")
         logger.info(f"  Rows: {len(column_data)} (unique columns per file)")
-        logger.info(f"  Columns: Filename, ColumnName")
+        logger.info(f"  Columns: ReportName, Dataset, ColumnName")
         print("\n" + "="*80)
         print("OUTPUT FILE LOCATION:")
         print("="*80)
@@ -826,7 +865,7 @@ def main():
         print("="*80)
         print(f"\n✓ Output written to: {abs_path}")
         print(f"  Rows: {len(column_data)} (unique columns per file)")
-        print(f"  Columns: Filename, ColumnName")
+        print(f"  Columns: ReportName, Dataset, ColumnName")
         print(f"  Log file: {log_file.absolute()}")
     
     # Show summary by file
@@ -836,9 +875,12 @@ def main():
     print("\n" + "="*60)
     print("SUMMARY BY FILE")
     print("="*60)
-    for filename, cols in sorted(file_columns.items()):
+    for file_key, cols in sorted(file_columns.items()):
+        # Parse filename for display
+        file_path = Path(file_key)
+        report_name, dataset = parse_filename(file_path)
         unique_in_file = len(set(cols))
-        summary_line = f"  {filename}: {len(cols)} unique columns"
+        summary_line = f"  {report_name} ({dataset}): {len(cols)} unique columns"
         logger.info(summary_line)
         print(summary_line)
     
@@ -849,8 +891,8 @@ def main():
     print("\n" + "="*60)
     print("SAMPLE OUTPUT (first 20 rows)")
     print("="*60)
-    for filename, col in column_data[:20]:
-        sample_line = f"  {filename} | {col}"
+    for report_name, dataset, col in column_data[:20]:
+        sample_line = f"  {report_name} | {dataset} | {col}"
         logger.info(sample_line)
         print(sample_line)
     if len(column_data) > 20:
