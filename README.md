@@ -103,7 +103,44 @@ The script creates an `output/` folder (or uses the specified output directory) 
 Files that cannot be parsed correctly or find 0 columns are:
 - Copied (not moved) to `Error_Reports/` subfolder
 - Logged with full details
-- Added to `errors.txt` report
+- Added to `errors.txt` report with detailed error information
+
+The `errors.txt` file includes comprehensive error details:
+- **Parse errors** with line numbers and column positions
+- **SQL context** showing 3 lines before/after the error location
+- **Dialect information** showing which SQL dialect was attempted
+- **Actionable suggestions** for fixing common SQL syntax issues
+- **Statement numbers** when processing multiple statements
+- **Full tracebacks** for non-parse errors
+
+Example error details in `errors.txt`:
+```
+File: query.sql
+Error: Failed to parse SQL
+
+Detailed Parse Errors:
+
+  Statement #1
+  Dialect: postgres
+  Error: Invalid expression / Unexpected token. Line 1, Col: 40.
+
+  Detailed Error Information:
+    Parse Error (ParseError)
+    Statement #1
+    Dialect: postgres
+    
+    Error: Invalid expression / Unexpected token. Line 1, Col: 40.
+    Line: 1
+    
+    Context:
+       1: SELECT * FROM table WHERE invalid
+    >>>   2: syntax error here
+    
+    Suggestions:
+      - Check for missing commas, parentheses, or quotes
+      - Verify SQL syntax matches the specified dialect
+      - Try specifying a dialect: --dialect postgres|mysql|tsql|snowflake
+```
 
 ## Output Format
 
@@ -207,12 +244,30 @@ The `errors.txt` file contains:
 - List of files with 0 columns found (with reasons)
 - Total counts and summary statistics
 
+## Error Reporting
+
+The script provides detailed error reporting to help diagnose SQL parsing issues:
+
+- **Enhanced error messages** with line numbers, column positions, and SQL context
+- **Multi-dialect fallback** automatically tries different SQL dialects
+- **Per-statement error handling** continues processing other statements if one fails
+- **Comprehensive error log** in `errors.txt` with all error details
+- **Error file copies** in `Error_Reports/` subfolder for easy review
+
+When a SQL file fails to parse, the error message includes:
+- Which statement failed (if multiple statements)
+- Which dialect was attempted
+- Exact line and column where the error occurred
+- SQL context around the error (3 lines before/after)
+- Specific suggestions for fixing the issue
+
 ## Limitations
 
 - Unqualified columns in multi-table queries may not be resolved if the table cannot be determined from context
 - Some SQL dialects may require explicit `--dialect` specification
 - Very large SQL files may take longer to process
 - Files with errors are copied (not moved) to Error_Reports for review
+- Dynamic SQL (EXEC with string literals) cannot be statically analyzed
 
 ## Requirements
 
