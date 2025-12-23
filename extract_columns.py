@@ -807,12 +807,16 @@ def main():
                     column_data.append((report_name, dataset, col))
                 logger.info(f"  Found {len(unique_columns_for_file)} unique columns in {report_name} ({dataset})")
         except Exception as e:
+            import traceback
             error_msg = f"Error processing {sql_file}: {e}"
+            full_traceback = traceback.format_exc()
             logger.error(error_msg, exc_info=True)
+            logger.error(f"Full traceback for {sql_file}:\n{full_traceback}")
             print(f"  {error_msg}", file=sys.stderr)
             files_with_errors.append({
                 'file': str(sql_file),
-                'error': str(e)
+                'error': str(e),
+                'traceback': full_traceback
             })
             continue
     
@@ -949,16 +953,24 @@ def main():
     # Show files with errors
     if files_with_errors:
         print(f"\nFiles with processing errors ({error_count}):")
-        logger.info(f"\nFiles with processing errors ({error_count}):")
+        logger.error(f"\nFiles with processing errors ({error_count}):")
         for file_info in files_with_errors[:20]:  # Show first 20
             msg = f"  {file_info['file']}: {file_info['error']}"
             logger.error(msg)
             print(msg)
+            # Log full traceback to log file
+            if 'traceback' in file_info:
+                logger.error(f"Full traceback for {file_info['file']}:\n{file_info['traceback']}")
         if len(files_with_errors) > 20:
             remaining = len(files_with_errors) - 20
             msg = f"  ... and {remaining} more files with errors"
             logger.info(msg)
             print(msg)
+            # Log tracebacks for remaining files
+            for file_info in files_with_errors[20:]:
+                logger.error(f"Error in {file_info['file']}: {file_info['error']}")
+                if 'traceback' in file_info:
+                    logger.error(f"Full traceback for {file_info['file']}:\n{file_info['traceback']}")
     
     # Show sample of extracted columns
     logger.info("\n" + "="*60)
