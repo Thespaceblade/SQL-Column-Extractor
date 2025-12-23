@@ -19,6 +19,7 @@ import csv
 import re
 import html
 import logging
+import shutil
 from pathlib import Path
 from typing import Optional
 from collections import defaultdict
@@ -653,15 +654,34 @@ def main():
     
     args = parser.parse_args()
     
-    # Determine output file name early (for logging setup)
+    # Determine output directory and file names
     if args.output:
         output_path = Path(args.output)
+        # If output is a directory, use it; otherwise extract directory from file path
+        if output_path.suffix:  # It's a file path
+            output_dir = output_path.parent
+            output_filename = output_path.name
+        else:  # It's a directory
+            output_dir = output_path
+            output_filename = "columns.csv"
     else:
-        # Default to columns.csv in current directory
-        output_path = Path("columns.csv")
+        # Default to output/ directory in current directory
+        output_dir = Path("output")
+        output_filename = "columns.csv"
     
-    # Setup logging (log file will be created alongside CSV/Excel)
-    log_file = output_path.with_suffix('.log')
+    # Create output directory if it doesn't exist
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create Error_Reports subdirectory
+    error_reports_dir = output_dir / "Error_Reports"
+    error_reports_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Set up file paths
+    output_path = output_dir / output_filename
+    log_file = output_dir / output_path.with_suffix('.log').name
+    errors_file = output_dir / "errors.txt"
+    
+    # Setup logging (log file will be in output directory)
     logger = setup_logging(log_file)
     
     logger.info("="*80)
@@ -792,6 +812,7 @@ def main():
             
             # Track files with zero columns
             if len(unique_columns_for_file) == 0:
+                import shutil
                 files_with_zero_columns.append({
                     'file': file_key,
                     'report_name': report_name,
@@ -800,6 +821,14 @@ def main():
                     'wildcards_filtered': wildcard_count
                 })
                 logger.warning(f"  No unique columns found in {report_name} ({dataset}) - Total extracted: {len(columns)}, Wildcards filtered: {wildcard_count}")
+                
+                # Copy file with zero columns to Error_Reports directory
+                try:
+                    error_report_path = error_reports_dir / sql_file.name
+                    shutil.copy2(sql_file, error_report_path)
+                    logger.info(f"Copied file with 0 columns to Error_Reports: {error_report_path}")
+                except Exception as copy_error:
+                    logger.error(f"Failed to copy file {sql_file} to Error_Reports: {copy_error}", exc_info=True)
             else:
                 files_successful.append(file_key)
                 # Add each unique column with parsed report name and dataset
@@ -813,6 +842,15 @@ def main():
             logger.error(error_msg, exc_info=True)
             logger.error(f"Full traceback for {sql_file}:\n{full_traceback}")
             print(f"  {error_msg}", file=sys.stderr)
+            
+            # Copy failed file to Error_Reports directory
+            try:
+                error_report_path = error_reports_dir / sql_file.name
+                shutil.copy2(sql_file, error_report_path)
+                logger.info(f"Copied failed file to Error_Reports: {error_report_path}")
+            except Exception as copy_error:
+                logger.error(f"Failed to copy error file {sql_file} to Error_Reports: {copy_error}", exc_info=True)
+            
             files_with_errors.append({
                 'file': str(sql_file),
                 'error': str(e),
@@ -858,7 +896,10 @@ def main():
             print(f"\n✓ Output written to: {abs_path}")
             print(f"  Rows: {len(df)} (unique columns per file)")
             print(f"  Columns: ReportName, Dataset, ColumnName")
+            print(f"  Output directory: {output_dir.absolute()}")
             print(f"  Log file: {log_file.absolute()}")
+            print(f"  Errors file: {errors_file.absolute()}")
+            print(f"  Error reports: {error_reports_dir.absolute()}")
             
         except ImportError:
             error_msg = "pandas and openpyxl required for Excel output"
@@ -892,7 +933,10 @@ def main():
         print(f"\n✓ Output written to: {abs_path}")
         print(f"  Rows: {len(column_data)} (unique columns per file)")
         print(f"  Columns: ReportName, Dataset, ColumnName")
+        print(f"  Output directory: {output_dir.absolute()}")
         print(f"  Log file: {log_file.absolute()}")
+        print(f"  Errors file: {errors_file.absolute()}")
+        print(f"  Error reports: {error_reports_dir.absolute()}")
     
     # Show summary by file
     logger.info("\n" + "="*60)
@@ -971,6 +1015,49 @@ def main():
                 logger.error(f"Error in {file_info['file']}: {file_info['error']}")
                 if 'traceback' in file_info:
                     logger.error(f"Full traceback for {file_info['file']}:\n{file_info['traceback']}")
+    
+    # Write errors to errors.txt file
+    if files_with_errors or files_with_zero_columns:
+        try:
+            with open(errors_file, 'w', encoding='utf-8') as f:
+                f.write("="*80 + "\n")
+                f.write("ERROR REPORT\n")
+                f.write("="*80 + "\n\n")
+                f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                
+                if files_with_errors:
+                    f.write(f"FILES WITH PROCESSING ERRORS ({len(files_with_errors)}):\n")
+                    f.write("-"*80 + "\n")
+                    for file_info in files_with_errors:
+                        f.write(f"\nFile: {file_info['file']}\n")
+                        f.write(f"Error: {file_info['error']}\n")
+                        if 'traceback' in file_info:
+                            f.write(f"Traceback:\n{file_info['traceback']}\n")
+                        f.write("-"*80 + "\n")
+                    f.write("\n")
+                
+                if files_with_zero_columns:
+                    f.write(f"FILES WITH 0 COLUMNS FOUND ({len(files_with_zero_columns)}):\n")
+                    f.write("-"*80 + "\n")
+                    for file_info in files_with_zero_columns:
+                        f.write(f"\nFile: {file_info['file']}\n")
+                        f.write(f"Report: {file_info['report_name']} ({file_info['dataset']})\n")
+                        if file_info['total_extracted'] > 0:
+                            f.write(f"Reason: {file_info['total_extracted']} columns extracted but filtered ")
+                            f.write(f"(wildcards: {file_info['wildcards_filtered']})\n")
+                        else:
+                            f.write(f"Reason: No columns extracted (may be DDL-only or parse error)\n")
+                        f.write("-"*80 + "\n")
+                    f.write("\n")
+                
+                f.write(f"\nTotal files with errors: {len(files_with_errors)}\n")
+                f.write(f"Total files with 0 columns: {len(files_with_zero_columns)}\n")
+                f.write(f"\nAll error files have been copied to: {error_reports_dir.absolute()}\n")
+            
+            logger.info(f"Error report written to: {errors_file.absolute()}")
+            print(f"\nError report written to: {errors_file.absolute()}")
+        except Exception as e:
+            logger.error(f"Failed to write error report file: {e}", exc_info=True)
     
     # Show sample of extracted columns
     logger.info("\n" + "="*60)
