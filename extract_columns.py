@@ -750,6 +750,11 @@ def main():
     column_data = []
     file_columns = {}
     
+    # Error tracking
+    files_with_errors = []  # Files that threw exceptions
+    files_with_zero_columns = []  # Files that processed but found 0 columns
+    files_successful = []  # Files that successfully found columns
+    
     logger.info(f"\nProcessing {len(sql_files)} SQL file(s)...")
     print(f"\nProcessing {len(sql_files)} SQL file(s)...")
     
@@ -770,10 +775,12 @@ def main():
             # Keep only unique columns per file (can have duplicates across files)
             unique_columns_for_file = []
             seen_in_file = set()
+            wildcard_count = 0
             
             for col in columns:
                 # Skip wildcard columns (table.*)
                 if col.endswith('.*'):
+                    wildcard_count += 1
                     logger.debug(f"Skipping wildcard column: {col}")
                     continue
                 # Deduplicate within this file
@@ -783,15 +790,30 @@ def main():
             
             file_columns[file_key] = unique_columns_for_file
             
-            # Add each unique column with parsed report name and dataset
-            for col in unique_columns_for_file:
-                column_data.append((report_name, dataset, col))
-            
-            logger.info(f"  Found {len(unique_columns_for_file)} unique columns in {report_name} ({dataset})")
+            # Track files with zero columns
+            if len(unique_columns_for_file) == 0:
+                files_with_zero_columns.append({
+                    'file': file_key,
+                    'report_name': report_name,
+                    'dataset': dataset,
+                    'total_extracted': len(columns),
+                    'wildcards_filtered': wildcard_count
+                })
+                logger.warning(f"  No unique columns found in {report_name} ({dataset}) - Total extracted: {len(columns)}, Wildcards filtered: {wildcard_count}")
+            else:
+                files_successful.append(file_key)
+                # Add each unique column with parsed report name and dataset
+                for col in unique_columns_for_file:
+                    column_data.append((report_name, dataset, col))
+                logger.info(f"  Found {len(unique_columns_for_file)} unique columns in {report_name} ({dataset})")
         except Exception as e:
             error_msg = f"Error processing {sql_file}: {e}"
             logger.error(error_msg, exc_info=True)
             print(f"  {error_msg}", file=sys.stderr)
+            files_with_errors.append({
+                'file': str(sql_file),
+                'error': str(e)
+            })
             continue
     
     # Count unique vs total
@@ -883,6 +905,60 @@ def main():
         summary_line = f"  {report_name} ({dataset}): {len(cols)} unique columns"
         logger.info(summary_line)
         print(summary_line)
+    
+    # Show error summary
+    print("\n" + "="*60)
+    print("PROCESSING SUMMARY")
+    print("="*60)
+    total_files = len(sql_files)
+    successful_count = len(files_successful)
+    zero_columns_count = len(files_with_zero_columns)
+    error_count = len(files_with_errors)
+    
+    logger.info("\n" + "="*60)
+    logger.info("PROCESSING SUMMARY")
+    logger.info("="*60)
+    logger.info(f"Total files processed: {total_files}")
+    logger.info(f"Successfully processed with columns: {successful_count}")
+    logger.info(f"Files with 0 columns found: {zero_columns_count}")
+    logger.info(f"Files with errors: {error_count}")
+    
+    print(f"Total files processed: {total_files}")
+    print(f"Successfully processed with columns: {successful_count}")
+    print(f"Files with 0 columns found: {zero_columns_count}")
+    print(f"Files with errors: {error_count}")
+    
+    # Show files with zero columns
+    if files_with_zero_columns:
+        print(f"\nFiles with 0 columns found ({zero_columns_count}):")
+        logger.info(f"\nFiles with 0 columns found ({zero_columns_count}):")
+        for file_info in files_with_zero_columns[:20]:  # Show first 20
+            msg = f"  {file_info['report_name']} ({file_info['dataset']}): {file_info['file']}"
+            if file_info['total_extracted'] > 0:
+                msg += f" - {file_info['total_extracted']} columns extracted but filtered (wildcards: {file_info['wildcards_filtered']})"
+            else:
+                msg += " - No columns extracted (may be DDL-only or parse error)"
+            logger.info(msg)
+            print(msg)
+        if len(files_with_zero_columns) > 20:
+            remaining = len(files_with_zero_columns) - 20
+            msg = f"  ... and {remaining} more files with 0 columns"
+            logger.info(msg)
+            print(msg)
+    
+    # Show files with errors
+    if files_with_errors:
+        print(f"\nFiles with processing errors ({error_count}):")
+        logger.info(f"\nFiles with processing errors ({error_count}):")
+        for file_info in files_with_errors[:20]:  # Show first 20
+            msg = f"  {file_info['file']}: {file_info['error']}"
+            logger.error(msg)
+            print(msg)
+        if len(files_with_errors) > 20:
+            remaining = len(files_with_errors) - 20
+            msg = f"  ... and {remaining} more files with errors"
+            logger.info(msg)
+            print(msg)
     
     # Show sample of extracted columns
     logger.info("\n" + "="*60)
