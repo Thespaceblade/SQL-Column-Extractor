@@ -47,7 +47,7 @@ except ImportError:
 #   FOLDER_PATH = r"C:\Users\username\Documents\SQL_Queries"  # Windows
 #   FOLDER_PATH = ""  # Leave empty to use command-line args or current directory
 # ============================================================================
-FOLDER_PATH = ""
+FOLDER_PATH = r""
 
 
 def parse_filename(filepath: Path) -> tuple[str, str]:
@@ -548,7 +548,7 @@ def format_parse_error(error: Exception, sql: str, dialect: Optional[str] = None
     return "\n".join(error_msg)
 
 
-def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Optional[str] = None) -> list:
+def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Optional[str] = None, error_details: Optional[list] = None) -> list:
     """
     Extract all table.column references from SQL.
     Resolves aliases to full table names and qualifies unqualified columns.
@@ -666,11 +666,21 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                 except Exception as e:
                     # Skip this statement but continue with others
                     failed_statements.append((i, try_dialect, str(e)))
-                    error_details = format_parse_error(e, sql, try_dialect, i)
+                    formatted_error = format_parse_error(e, sql, try_dialect, i)
                     file_info = f" in {filepath}" if filepath else ""
+                    
+                    # Store error details if list provided
+                    if error_details is not None:
+                        error_details.append({
+                            'statement': i + 1,
+                            'dialect': try_dialect or 'generic',
+                            'error': str(e),
+                            'formatted': formatted_error
+                        })
+                    
                     print(f"\n{'='*80}", file=sys.stderr)
                     print(f"Warning: Failed to process statement {i+1}{file_info}", file=sys.stderr)
-                    print(error_details, file=sys.stderr)
+                    print(formatted_error, file=sys.stderr)
                     print(f"{'='*80}\n", file=sys.stderr)
                     continue
             
@@ -693,26 +703,37 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
     
     # If all dialects failed, print detailed error
     if last_error:
-        error_details = format_parse_error(last_error, sql, last_dialect)
+        formatted_error = format_parse_error(last_error, sql, last_dialect)
         file_info = f"\nFile: {filepath}" if filepath else ""
         dialects_tried = ', '.join(str(d) if d else 'generic' for d in dialects_to_try)
+        
+        # Store error details if list provided
+        if error_details is not None:
+            error_details.append({
+                'statement': 'all',
+                'dialect': last_dialect or 'generic',
+                'error': str(last_error),
+                'formatted': formatted_error,
+                'dialects_tried': dialects_tried
+            })
         
         print(f"\n{'='*80}", file=sys.stderr)
         print(f"ERROR: Failed to parse SQL{file_info}", file=sys.stderr)
         print(f"Dialects tried: {dialects_tried}", file=sys.stderr)
-        print(error_details, file=sys.stderr)
+        print(formatted_error, file=sys.stderr)
         print(f"{'='*80}\n", file=sys.stderr)
     
     return columns
 
 
-def process_sql_file(filepath: Path, dialect: Optional[str] = None) -> list:
+def process_sql_file(filepath: Path, dialect: Optional[str] = None, error_details: Optional[list] = None) -> list:
     """
     Process a single SQL file and return all table.column references (all occurrences).
     
     Args:
         filepath: Path to SQL file
         dialect: SQL dialect to use (None = auto-detect)
+        error_details: Optional list to collect detailed error information
     
     Returns:
         List of table.column references
@@ -732,7 +753,7 @@ def process_sql_file(filepath: Path, dialect: Optional[str] = None) -> list:
             print(f"Warning: File {filepath} contains only comments/DDL (no query statements)", file=sys.stderr)
             return []
         
-        return extract_table_columns(content, dialect, str(filepath))
+        return extract_table_columns(content, dialect, str(filepath), error_details)
     
     except FileNotFoundError:
         print(f"ERROR: File not found: {filepath}", file=sys.stderr)
@@ -926,8 +947,9 @@ def main():
     for sql_file in sql_files:
         logger.info(f"Processing: {sql_file}")
         print(f"  Processing: {sql_file}")
+        file_error_details = []  # Collect error details for this file
         try:
-            columns = process_sql_file(sql_file, args.dialect)
+            columns = process_sql_file(sql_file, args.dialect, file_error_details)
             
             # Parse filename to get report name and dataset
             report_name, dataset = parse_filename(sql_file)
@@ -996,11 +1018,18 @@ def main():
             except Exception as copy_error:
                 logger.error(f"Failed to copy error file {sql_file} to Error_Reports: {copy_error}", exc_info=True)
             
-            files_with_errors.append({
+            # Combine error details if available
+            error_info = {
                 'file': str(sql_file),
                 'error': str(e),
                 'traceback': full_traceback
-            })
+            }
+            
+            # Add detailed parse errors if available
+            if file_error_details:
+                error_info['parse_errors'] = file_error_details
+            
+            files_with_errors.append(error_info)
             continue
     
     # Count unique vs total
@@ -1176,8 +1205,24 @@ def main():
                     for file_info in files_with_errors:
                         f.write(f"\nFile: {file_info['file']}\n")
                         f.write(f"Error: {file_info['error']}\n")
+                        
+                        # Write detailed parse errors if available
+                        if 'parse_errors' in file_info and file_info['parse_errors']:
+                            f.write(f"\nDetailed Parse Errors:\n")
+                            for parse_error in file_info['parse_errors']:
+                                f.write(f"\n  Statement #{parse_error.get('statement', 'unknown')}\n")
+                                f.write(f"  Dialect: {parse_error.get('dialect', 'unknown')}\n")
+                                if 'dialects_tried' in parse_error:
+                                    f.write(f"  Dialects tried: {parse_error['dialects_tried']}\n")
+                                f.write(f"  Error: {parse_error.get('error', 'Unknown error')}\n")
+                                f.write(f"\n  Detailed Error Information:\n")
+                                # Indent the formatted error
+                                formatted = parse_error.get('formatted', '')
+                                for line in formatted.split('\n'):
+                                    f.write(f"    {line}\n")
+                        
                         if 'traceback' in file_info:
-                            f.write(f"Traceback:\n{file_info['traceback']}\n")
+                            f.write(f"\nTraceback:\n{file_info['traceback']}\n")
                         f.write("-"*80 + "\n")
                     f.write("\n")
                 
