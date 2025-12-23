@@ -154,6 +154,12 @@ def preprocess_sql(sql: str) -> str:
     sql = re.sub(r'(?i)\bTOP\s*\(\s*\d+\s*\)\s+', '', sql)
     sql = re.sub(r'(?i)\bTOP\s+\d+\s+', '', sql)
     
+    # Remove ANSI escape sequences (like [4m, [0m, [31m, etc.)
+    # These can appear as \x1b[...m, \033[...m, or just [...m if escape char was removed
+    sql = re.sub(r'\x1b\[[0-9;]*m', '', sql)  # \x1b[...m format
+    sql = re.sub(r'\033\[[0-9;]*m', '', sql)  # \033[...m format
+    sql = re.sub(r'\[[0-9;]*m', '', sql)     # [...m format (if escape char already removed)
+    
     # Remove escape codes (like \x1b, \033, etc.)
     sql = re.sub(r'\\x[0-9a-fA-F]{2}', '', sql)
     sql = re.sub(r'\\[0-9]{3}', '', sql)
@@ -561,7 +567,7 @@ def normalize_dialect(dialect: Optional[str]) -> Optional[str]:
         Normalized dialect name or None
     """
     if not dialect:
-        return None
+        return 'tsql'
     
     dialect_lower = dialect.lower().strip()
     
