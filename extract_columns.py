@@ -155,6 +155,16 @@ def preprocess_sql(sql: str) -> str:
     sql = re.sub(r'(?i)\bTOP\s+\d+\s+', '', sql)
     
     # Remove ANSI escape sequences comprehensively
+    # Order matters: remove complete sequences BEFORE removing standalone escape chars
+    
+    # Handle CSI sequences starting with \x9B FIRST (before removing \x9B standalone)
+    # CSI sequences: \x9B[ followed by digits/semicolons, then ending char
+    ansi_csi = re.compile(r'\x9B\[[0-9;]*[a-zA-Z@-~]')
+    sql = ansi_csi.sub('', sql)
+    
+    # Also catch any \x9B sequences that might be malformed or different format
+    sql = re.sub(r'\x9B[^\x20-\x7E]*', '', sql)
+    
     # ANSI escape codes can start with \x1B (ESC), \033 (octal), or \x9B (CSI)
     # Pattern matches: ESC[@-Z\\-_] (single char commands) or ESC[[0-?]*[/]*[@~~] (CSI sequences)
     # This covers SGR codes ([...m), cursor movement, colors, etc.
@@ -165,19 +175,11 @@ def preprocess_sql(sql: str) -> str:
     ansi_escape_octal = re.compile(r'\033(?:[@-Z\\-_]|\[[0-?]*[/]*[@-~])')
     sql = ansi_escape_octal.sub('', sql)
     
-    # Handle CSI sequences starting with \x9B (CSI character)
-    # CSI sequences: \x9B followed by parameter bytes (0x30-0x3F), intermediate bytes (0x20-0x2F), final byte (0x40-0x7E)
-    ansi_csi = re.compile(r'\x9B[0-?]*[/]*[@-~]')
-    sql = ansi_csi.sub('', sql)
-    
-    # Also handle \x9B sequences that might have lost formatting
-    sql = re.sub(r'\x9B[^\x20-\x7E]*', '', sql)
-    
     # Remove ANSI escape sequences that lost their escape character (just [...m, [...H, etc.)
     # Match [ followed by parameter bytes (0x30-0x3F), intermediate bytes (0x20-0x2F), final byte (0x40-0x7E)
     sql = re.sub(r'\[[\x20-\x3F]*[\x40-\x7E]', '', sql)
     
-    # Remove standalone escape characters that might be left behind
+    # Remove standalone escape characters that might be left behind (do this LAST)
     sql = re.sub(r'[\x1B\x9B]', '', sql)  # ESC and CSI characters
     
     # Remove string literal escape codes (like \x1b, \033, \n, \t, etc. in string literals)
