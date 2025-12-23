@@ -466,11 +466,98 @@ def resolve_unqualified_columns(stmt: exp.Expression, alias_map: dict) -> dict:
     return column_to_table
 
 
-def extract_table_columns(sql: str, dialect: Optional[str] = None) -> list:
+def format_parse_error(error: Exception, sql: str, dialect: Optional[str] = None, statement_num: Optional[int] = None) -> str:
+    """
+    Format a parse error with detailed information.
+    
+    Args:
+        error: The parse error exception
+        sql: The SQL string that failed to parse
+        dialect: The dialect that was being used
+        statement_num: Statement number if processing multiple statements
+        
+    Returns:
+        Formatted error message string
+    """
+    error_msg = []
+    
+    # Error type and basic message
+    error_type = type(error).__name__
+    error_msg.append(f"Parse Error ({error_type})")
+    
+    if statement_num is not None:
+        error_msg.append(f"Statement #{statement_num + 1}")
+    
+    if dialect:
+        error_msg.append(f"Dialect: {dialect}")
+    else:
+        error_msg.append("Dialect: Generic SQL")
+    
+    error_msg.append("")
+    
+    # Get error message
+    error_str = str(error)
+    error_msg.append(f"Error: {error_str}")
+    
+    # Try to extract line/column information from ParseError
+    if isinstance(error, ParseError):
+        # ParseError may have line/col information
+        if hasattr(error, 'message'):
+            error_msg.append(f"Details: {error.message}")
+        
+        # Try to find line number in error message
+        import re
+        line_match = re.search(r'line\s+(\d+)', error_str, re.IGNORECASE)
+        col_match = re.search(r'col(umn)?\s+(\d+)', error_str, re.IGNORECASE)
+        
+        if line_match:
+            line_num = int(line_match.group(1))
+            error_msg.append(f"Line: {line_num}")
+            
+            # Show context around the error line
+            sql_lines = sql.split('\n')
+            if 1 <= line_num <= len(sql_lines):
+                start_line = max(0, line_num - 3)
+                end_line = min(len(sql_lines), line_num + 2)
+                
+                error_msg.append("\nContext:")
+                for i in range(start_line, end_line):
+                    line_prefix = ">>> " if i == line_num - 1 else "    "
+                    error_msg.append(f"{line_prefix}{i+1:4d}: {sql_lines[i]}")
+        
+        if col_match:
+            col_num = int(col_match.group(2))
+            error_msg.append(f"Column: {col_num}")
+    
+    # Common error suggestions
+    error_msg.append("\nSuggestions:")
+    
+    if "unexpected" in error_str.lower() or "syntax" in error_str.lower():
+        error_msg.append("  - Check for missing commas, parentheses, or quotes")
+        error_msg.append("  - Verify SQL syntax matches the specified dialect")
+        error_msg.append("  - Check for unclosed quotes or parentheses")
+    
+    if "unknown" in error_str.lower() or "invalid" in error_str.lower():
+        error_msg.append("  - Verify table/column names are correct")
+        error_msg.append("  - Check for reserved keywords that need quoting")
+        error_msg.append("  - Ensure dialect-specific syntax is correct")
+    
+    if not dialect:
+        error_msg.append("  - Try specifying a dialect: --dialect postgres|mysql|tsql|snowflake")
+    
+    return "\n".join(error_msg)
+
+
+def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Optional[str] = None) -> list:
     """
     Extract all table.column references from SQL.
     Resolves aliases to full table names and qualifies unqualified columns.
     Returns ALL occurrences (not unique) - every time a table.column is referenced.
+    
+    Args:
+        sql: SQL string to parse
+        dialect: SQL dialect to use (None = auto-detect)
+        filepath: Optional filepath for better error messages
     
     Returns:
         List of strings in format "table.column" or "schema.table.column"
@@ -479,20 +566,29 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None) -> list:
     columns = []
     
     # If no dialect specified, try common dialects on parse failure
-    dialects_to_try = [dialect] if dialect else [None, 'tsql', 'mssql', 'postgres', 'mysql']
+    dialects_to_try = [dialect] if dialect else [None, 'tsql', 'mssql', 'postgres', 'mysql', 'snowflake']
     
     last_error = None
+    last_dialect = None
+    failed_statements = []
+    
     for try_dialect in dialects_to_try:
         try:
             statements = sqlglot.parse(sql, dialect=try_dialect)
             
             # Check if parsing succeeded (at least one non-None statement)
             if not statements or all(s is None for s in statements):
+                # All statements failed to parse
+                if len(statements) > 0:
+                    # We got statements but they're all None - parsing failed
+                    last_error = ParseError(f"Failed to parse SQL with dialect '{try_dialect or 'generic'}': All statements returned None")
+                    last_dialect = try_dialect
                 continue
             
             # Process each statement individually, skip ones that fail
             for i, stmt in enumerate(statements):
                 if stmt is None:
+                    failed_statements.append((i, try_dialect, "Statement parsed as None"))
                     continue
                 
                 try:
@@ -569,41 +665,90 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None) -> list:
                 
                 except Exception as e:
                     # Skip this statement but continue with others
-                    # Note: logger might not be available here, so use print
-                    print(f"Warning: Skipped statement {i+1} due to error: {e}", file=sys.stderr)
+                    failed_statements.append((i, try_dialect, str(e)))
+                    error_details = format_parse_error(e, sql, try_dialect, i)
+                    file_info = f" in {filepath}" if filepath else ""
+                    print(f"\n{'='*80}", file=sys.stderr)
+                    print(f"Warning: Failed to process statement {i+1}{file_info}", file=sys.stderr)
+                    print(error_details, file=sys.stderr)
+                    print(f"{'='*80}\n", file=sys.stderr)
                     continue
             
             # If we extracted any columns, return them (even if some statements failed)
             if columns:
+                if failed_statements:
+                    print(f"Note: Successfully extracted columns despite {len(failed_statements)} failed statement(s)", file=sys.stderr)
                 return columns
             
         except ParseError as e:
             last_error = e
+            last_dialect = try_dialect
             # Try next dialect
             continue
         except Exception as e:
             last_error = e
+            last_dialect = try_dialect
             # Try next dialect
             continue
     
-    # If all dialects failed, print error but don't fail completely
+    # If all dialects failed, print detailed error
     if last_error:
-        # Note: logger might not be available here, so use print
-        print(f"Warning: Parse error (tried dialects: {', '.join(str(d) for d in dialects_to_try if d)}): {last_error}", file=sys.stderr)
-        print("Attempting to extract columns from successfully parsed statements...", file=sys.stderr)
+        error_details = format_parse_error(last_error, sql, last_dialect)
+        file_info = f"\nFile: {filepath}" if filepath else ""
+        dialects_tried = ', '.join(str(d) if d else 'generic' for d in dialects_to_try)
+        
+        print(f"\n{'='*80}", file=sys.stderr)
+        print(f"ERROR: Failed to parse SQL{file_info}", file=sys.stderr)
+        print(f"Dialects tried: {dialects_tried}", file=sys.stderr)
+        print(error_details, file=sys.stderr)
+        print(f"{'='*80}\n", file=sys.stderr)
     
     return columns
 
 
 def process_sql_file(filepath: Path, dialect: Optional[str] = None) -> list:
-    """Process a single SQL file and return all table.column references (all occurrences)."""
-    with open(filepath, "r", encoding='utf-8', errors='ignore') as f:
-        content = f.read()
+    """
+    Process a single SQL file and return all table.column references (all occurrences).
     
-    # Preprocess SQL to handle edge cases
-    content = preprocess_sql(content)
+    Args:
+        filepath: Path to SQL file
+        dialect: SQL dialect to use (None = auto-detect)
     
-    return extract_table_columns(content, dialect)
+    Returns:
+        List of table.column references
+    """
+    try:
+        with open(filepath, "r", encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        
+        if not content.strip():
+            print(f"Warning: File {filepath} is empty", file=sys.stderr)
+            return []
+        
+        # Preprocess SQL to handle edge cases
+        content = preprocess_sql(content)
+        
+        if not content.strip():
+            print(f"Warning: File {filepath} contains only comments/DDL (no query statements)", file=sys.stderr)
+            return []
+        
+        return extract_table_columns(content, dialect, str(filepath))
+    
+    except FileNotFoundError:
+        print(f"ERROR: File not found: {filepath}", file=sys.stderr)
+        return []
+    except PermissionError:
+        print(f"ERROR: Permission denied reading file: {filepath}", file=sys.stderr)
+        return []
+    except UnicodeDecodeError as e:
+        print(f"ERROR: Unable to decode file {filepath}: {e}", file=sys.stderr)
+        print("  Try checking file encoding or use a different encoding", file=sys.stderr)
+        return []
+    except Exception as e:
+        print(f"ERROR: Unexpected error reading file {filepath}: {e}", file=sys.stderr)
+        import traceback
+        print(traceback.format_exc(), file=sys.stderr)
+        return []
 
 
 def setup_logging(log_file: Path):
