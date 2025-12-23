@@ -1345,7 +1345,29 @@ def main():
         print(f"  Processing: {sql_file}")
         file_error_details = []  # Collect error details for this file
         try:
-            columns = process_sql_file(sql_file, args.dialect, file_error_details)
+            # Determine flags from command-line arguments
+            enable_unqualified = not args.no_unqualified_resolution
+            try_multiple = args.try_multiple_dialects
+            
+            # Process SQL file - returns (columns, status) tuple
+            result = process_sql_file(
+                sql_file, 
+                args.dialect, 
+                file_error_details,
+                enable_unqualified_resolution=enable_unqualified,
+                try_multiple_dialects=try_multiple
+            )
+            
+            # Safely unpack the result tuple
+            if not isinstance(result, tuple) or len(result) != 2:
+                raise ValueError(f"process_sql_file returned unexpected result: {result} (expected tuple of length 2)")
+            
+            columns, status = result
+            
+            # Ensure status is a valid string
+            if not isinstance(status, str):
+                logger.warning(f"Invalid status type from process_sql_file: {type(status)}, defaulting to PARSE_ERROR")
+                status = "PARSE_ERROR"
             
             # Parse filename to get report name and dataset
             report_name, dataset = parse_filename(sql_file)
@@ -1389,11 +1411,26 @@ def main():
             elif status == "PARSE_ERROR":
                 # Hard parse error - copy to Error_Reports
                 import shutil
+                # Build error message from parse errors if available
+                error_msg = "Parse error occurred"
+                if file_error_details:
+                    error_parts = []
+                    for parse_err in file_error_details:
+                        err_text = parse_err.get('error', 'Unknown parse error')
+                        dialect = parse_err.get('dialect', 'unknown')
+                        stmt = parse_err.get('statement', 'unknown')
+                        error_parts.append(f"Statement {stmt} (dialect: {dialect}): {err_text}")
+                    if error_parts:
+                        error_msg = "; ".join(error_parts[:3])  # Limit to first 3 errors
+                        if len(error_parts) > 3:
+                            error_msg += f" ... and {len(error_parts) - 3} more"
+                
                 error_info = {
                     'file': file_key,
                     'report_name': report_name,
                     'dataset': dataset,
                     'status': status,
+                    'error': error_msg,  # Add error field for consistency
                     'total_extracted': len(columns),
                     'wildcards_filtered': wildcard_count
                 }
@@ -1469,6 +1506,8 @@ def main():
     print(f"Across {len(file_columns)} file(s)")
     
     # Output to CSV or Excel
+    # Track if CSV was written (for safety check)
+    csv_written = False
     
     if output_path.suffix.lower() == '.xlsx':
         # Excel output
@@ -1476,10 +1515,11 @@ def main():
             import pandas as pd
             
             # Create DataFrame with ReportName, Dataset, and ColumnName
+            # Ensure all values are strings and handle None/empty values
             df = pd.DataFrame({
-                'ReportName': [report for report, _, _ in column_data],
-                'Dataset': [dataset for _, dataset, _ in column_data],
-                'ColumnName': [col for _, _, col in column_data]
+                'ReportName': [str(report) if report else '' for report, _, _ in column_data],
+                'Dataset': [str(dataset) if dataset else '' for _, dataset, _ in column_data],
+                'ColumnName': [str(col) if col else '' for _, _, col in column_data]
             })
             
             df.to_excel(output_path, index=False)
@@ -1499,6 +1539,7 @@ def main():
             print(f"  Log file: {log_file.absolute()}")
             print(f"  Errors file: {errors_file.absolute()}")
             print(f"  Error reports: {error_reports_dir.absolute()}")
+            csv_written = True  # Excel written successfully
             
         except ImportError:
             error_msg = "pandas and openpyxl required for Excel output"
@@ -1513,29 +1554,46 @@ def main():
     
     if output_path.suffix.lower() == '.csv':
         # CSV output
-        with open(output_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(['ReportName', 'Dataset', 'ColumnName'])  # Header
+        try:
+            with open(output_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['ReportName', 'Dataset', 'ColumnName'])  # Header
+                
+                for report_name, dataset, col in column_data:
+                    # Ensure all values are strings and handle None/empty values
+                    safe_report = str(report_name) if report_name else ''
+                    safe_dataset = str(dataset) if dataset else ''
+                    safe_col = str(col) if col else ''
+                    writer.writerow([safe_report, safe_dataset, safe_col])
             
-            for report_name, dataset, col in column_data:
-                writer.writerow([report_name, dataset, col])
-        
-        abs_path = output_path.absolute()
-        logger.info(f"CSV output written successfully: {abs_path}")
-        logger.info(f"  Rows: {len(column_data)} (unique columns per file)")
-        logger.info(f"  Columns: ReportName, Dataset, ColumnName")
-        print("\n" + "="*80)
-        print("OUTPUT FILE LOCATION:")
-        print("="*80)
-        print(f"  {abs_path}")
-        print("="*80)
-        print(f"\n✓ Output written to: {abs_path}")
-        print(f"  Rows: {len(column_data)} (unique columns per file)")
-        print(f"  Columns: ReportName, Dataset, ColumnName")
-        print(f"  Output directory: {output_dir.absolute()}")
-        print(f"  Log file: {log_file.absolute()}")
-        print(f"  Errors file: {errors_file.absolute()}")
-        print(f"  Error reports: {error_reports_dir.absolute()}")
+            abs_path = output_path.absolute()
+            logger.info(f"CSV output written successfully: {abs_path}")
+            logger.info(f"  Rows: {len(column_data)} (unique columns per file)")
+            logger.info(f"  Columns: ReportName, Dataset, ColumnName")
+            print("\n" + "="*80)
+            print("OUTPUT FILE LOCATION:")
+            print("="*80)
+            print(f"  {abs_path}")
+            print("="*80)
+            print(f"\n✓ Output written to: {abs_path}")
+            print(f"  Rows: {len(column_data)} (unique columns per file)")
+            print(f"  Columns: ReportName, Dataset, ColumnName")
+            print(f"  Output directory: {output_dir.absolute()}")
+            print(f"  Log file: {log_file.absolute()}")
+            print(f"  Errors file: {errors_file.absolute()}")
+            print(f"  Error reports: {error_reports_dir.absolute()}")
+            csv_written = True  # CSV written successfully
+        except Exception as e:
+            error_msg = f"Failed to write CSV file {output_path}: {e}"
+            logger.error(error_msg, exc_info=True)
+            print(f"\nERROR: {error_msg}", file=sys.stderr)
+            import traceback
+            print(traceback.format_exc(), file=sys.stderr)
+    
+    # Ensure CSV is written if it wasn't written yet (shouldn't happen, but safety check)
+    if not csv_written and output_path.suffix.lower() != '.xlsx':
+        logger.warning(f"CSV file was not written. Output path: {output_path}")
+        print(f"\nWARNING: CSV file was not written. Output path: {output_path}", file=sys.stderr)
     
     # Show summary by file
     logger.info("\n" + "="*60)
@@ -1598,7 +1656,8 @@ def main():
         print(f"\nFiles with processing errors ({error_count}):")
         logger.error(f"\nFiles with processing errors ({error_count}):")
         for file_info in files_with_errors[:20]:  # Show first 20
-            msg = f"  {file_info['file']}: {file_info['error']}"
+            error_msg = file_info.get('error', 'Unknown error (see parse_errors for details)')
+            msg = f"  {file_info['file']}: {error_msg}"
             logger.error(msg)
             print(msg)
             # Log full traceback to log file
@@ -1611,7 +1670,8 @@ def main():
             print(msg)
             # Log tracebacks for remaining files
             for file_info in files_with_errors[20:]:
-                logger.error(f"Error in {file_info['file']}: {file_info['error']}")
+                error_msg = file_info.get('error', 'Unknown error (see parse_errors for details)')
+                logger.error(f"Error in {file_info['file']}: {error_msg}")
                 if 'traceback' in file_info:
                     logger.error(f"Full traceback for {file_info['file']}:\n{file_info['traceback']}")
     
@@ -1633,7 +1693,8 @@ def main():
                     f.write("-"*80 + "\n")
                     for file_info in files_with_errors:
                         f.write(f"\nFile: {file_info['file']}\n")
-                        f.write(f"Error: {file_info['error']}\n")
+                        error_msg = file_info.get('error', 'Unknown error (see parse_errors for details)')
+                        f.write(f"Error: {error_msg}\n")
                         
                         # Write detailed parse errors if available
                         if 'parse_errors' in file_info and file_info['parse_errors']:
