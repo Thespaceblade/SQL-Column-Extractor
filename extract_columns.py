@@ -573,8 +573,12 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
     last_error = None
     last_dialect = None
     failed_statements = []
+    dialects_tried = []  # Track which dialects we actually attempted
     
     for try_dialect in dialects_to_try:
+        dialect_name = try_dialect or 'generic'
+        dialects_tried.append(dialect_name)
+        
         try:
             statements = sqlglot.parse(sql, dialect=try_dialect)
             
@@ -722,24 +726,47 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                 # But don't treat this as a complete failure
                 return columns
             
-            # If we got here, no columns were extracted
+            # If we got here, no columns were extracted with this dialect
             # This could mean:
-            # 1. All statements failed to parse
+            # 1. All statements failed to parse (handled above with continue)
             # 2. Statements parsed but had no extractable columns
-            # If we have failed_statements, that's a parse error
+            # 3. All statements failed during processing (all hit exceptions)
+            # Continue to next dialect to try parsing with a different dialect
+            # Note: We don't return here - we continue the loop to try next dialect
             if failed_statements and error_details is not None:
                 # We already captured errors above, but make sure they're in error_details
                 # Errors should already be captured in the loop above
                 pass
             
+            # Reset failed_statements for next dialect attempt
+            failed_statements = []
+            
         except ParseError as e:
             last_error = e
             last_dialect = try_dialect
+            # Store error for this dialect attempt
+            if error_details is not None:
+                formatted_error = format_parse_error(e, sql, try_dialect)
+                error_details.append({
+                    'statement': 'all',
+                    'dialect': try_dialect or 'generic',
+                    'error': str(e),
+                    'formatted': formatted_error
+                })
             # Try next dialect
             continue
         except Exception as e:
             last_error = e
             last_dialect = try_dialect
+            # Store error for this dialect attempt
+            if error_details is not None:
+                formatted_error = format_parse_error(e, sql, try_dialect)
+                error_details.append({
+                    'statement': 'all',
+                    'dialect': try_dialect or 'generic',
+                    'error': str(e),
+                    'formatted': formatted_error
+                })
             # Try next dialect
             continue
     
@@ -747,21 +774,23 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
     if last_error:
         formatted_error = format_parse_error(last_error, sql, last_dialect)
         file_info = f"\nFile: {filepath}" if filepath else ""
-        dialects_tried = ', '.join(str(d) if d else 'generic' for d in dialects_to_try)
+        dialects_tried_str = ', '.join(dialects_tried)
         
         # Store error details if list provided
         if error_details is not None:
-            error_details.append({
-                'statement': 'all',
-                'dialect': last_dialect or 'generic',
-                'error': str(last_error),
-                'formatted': formatted_error,
-                'dialects_tried': dialects_tried
-            })
+            # Check if we already have an error for this dialect
+            if not any(ed.get('statement') == 'all' and ed.get('dialect') == (last_dialect or 'generic') for ed in error_details):
+                error_details.append({
+                    'statement': 'all',
+                    'dialect': last_dialect or 'generic',
+                    'error': str(last_error),
+                    'formatted': formatted_error,
+                    'dialects_tried': dialects_tried_str
+                })
         
         print(f"\n{'='*80}", file=sys.stderr)
         print(f"ERROR: Failed to parse SQL{file_info}", file=sys.stderr)
-        print(f"Dialects tried: {dialects_tried}", file=sys.stderr)
+        print(f"Dialects tried ({len(dialects_tried)}): {dialects_tried_str}", file=sys.stderr)
         print(formatted_error, file=sys.stderr)
         print(f"{'='*80}\n", file=sys.stderr)
     
