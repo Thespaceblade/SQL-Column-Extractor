@@ -154,21 +154,59 @@ def preprocess_sql(sql: str) -> str:
     sql = re.sub(r'(?i)\bTOP\s*\(\s*\d+\s*\)\s+', '', sql)
     sql = re.sub(r'(?i)\bTOP\s+\d+\s+', '', sql)
     
-    # Remove ANSI escape sequences (like [4m, [0m, [31m, etc.)
-    # These can appear as \x1b[...m, \033[...m, or just [...m if escape char was removed
-    sql = re.sub(r'\x1b\[[0-9;]*m', '', sql)  # \x1b[...m format
-    sql = re.sub(r'\033\[[0-9;]*m', '', sql)  # \033[...m format
-    sql = re.sub(r'\[[0-9;]*m', '', sql)     # [...m format (if escape char already removed)
+    # Remove ANSI escape sequences comprehensively
+    # ANSI escape codes can start with \x1B (ESC), \033 (octal), or \x9B (CSI)
+    # Pattern matches: ESC[@-Z\\-_] (single char commands) or ESC[[0-?]*[/]*[@~~] (CSI sequences)
+    # This covers SGR codes ([...m), cursor movement, colors, etc.
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[/]*[@-~])')
+    sql = ansi_escape.sub('', sql)
     
-    # Remove escape codes (like \x1b, \033, etc.)
-    sql = re.sub(r'\\x[0-9a-fA-F]{2}', '', sql)
-    sql = re.sub(r'\\[0-9]{3}', '', sql)
-    sql = re.sub(r'\\[a-zA-Z]', '', sql)
+    # Also handle octal escape sequences (\033)
+    ansi_escape_octal = re.compile(r'\033(?:[@-Z\\-_]|\[[0-?]*[/]*[@-~])')
+    sql = ansi_escape_octal.sub('', sql)
     
-    # Remove ASCII control characters (except newline, tab, carriage return)
+    # Handle CSI sequences starting with \x9B (CSI character)
+    # CSI sequences: \x9B followed by parameter bytes (0x30-0x3F), intermediate bytes (0x20-0x2F), final byte (0x40-0x7E)
+    ansi_csi = re.compile(r'\x9B[0-?]*[/]*[@-~]')
+    sql = ansi_csi.sub('', sql)
+    
+    # Also handle \x9B sequences that might have lost formatting
+    sql = re.sub(r'\x9B[^\x20-\x7E]*', '', sql)
+    
+    # Remove ANSI escape sequences that lost their escape character (just [...m, [...H, etc.)
+    # Match [ followed by optional numbers/semicolons, optional /, and ending character
+    sql = re.sub(r'\[[0-9;]*[/]*[@-~]', '', sql)
+    
+    # Remove standalone escape characters that might be left behind
+    sql = re.sub(r'[\x1B\x9B]', '', sql)  # ESC and CSI characters
+    
+    # Remove string literal escape codes (like \x1b, \033, \n, \t, etc. in string literals)
+    # But be careful - we don't want to remove actual SQL escape sequences
+    # Only remove if they appear outside of quoted strings (rough heuristic)
+    # This is safer - just remove obvious problematic patterns
+    sql = re.sub(r'\\x1[bB]', '', sql)  # \x1b or \x1B
+    sql = re.sub(r'\\033', '', sql)     # \033
+    sql = re.sub(r'\\x9[bB]', '', sql)  # \x9b or \x9B
+    
+    # Remove other escape sequences that might cause issues
+    sql = re.sub(r'\\x[0-9a-fA-F]{2}', '', sql)  # Any \xXX hex escape
+    sql = re.sub(r'\\[0-7]{1,3}', '', sql)        # Octal escapes (\0 to \377)
+    
+    # Remove ASCII control characters (except newline \n=0x0A, tab \t=0x09, carriage return \r=0x0D)
+    # Keep: \x09 (tab), \x0A (LF), \x0D (CR)
+    # Remove: \x00-\x08, \x0B-\x0C, \x0E-\x1F, \x7F
     sql = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', sql)
     
-    # Remove non-printable characters (but keep newlines, tabs, spaces, and common punctuation)
+    # Remove Unicode control characters and zero-width characters
+    # Zero-width space, zero-width non-joiner, zero-width joiner, left-to-right mark, right-to-left mark
+    sql = re.sub(r'[\u200B-\u200D\uFEFF\u200E\u200F]', '', sql)
+    
+    # Remove BOM (Byte Order Mark) if present
+    if sql.startswith('\ufeff'):
+        sql = sql[1:]
+    
+    # Remove other non-printable Unicode characters (but keep common punctuation and letters)
+    # Keep printable ASCII (\x20-\x7E) and common whitespace (\n, \r, \t)
     sql = re.sub(r'[^\x20-\x7E\n\r\t]', '', sql)
     
     # Normalize whitespace
