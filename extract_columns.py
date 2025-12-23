@@ -543,10 +543,46 @@ def format_parse_error(error: Exception, sql: str, dialect: Optional[str] = None
         error_msg.append("  - Ensure dialect-specific syntax is correct")
     
     if not dialect:
-        error_msg.append("  - Try specifying a dialect: --dialect tsql|postgres|mysql|snowflake|oracle|bigquery")
-        error_msg.append("    (Note: 'tsql' is for SQL Server/MSSQL)")
+        error_msg.append("  - Try specifying a dialect: --dialect tsql|mssql|postgres|mysql|snowflake|oracle|bigquery")
+        error_msg.append("    (Note: 'tsql'/'mssql' is for SQL Server - 'mssql' is automatically converted to 'tsql')")
     
     return "\n".join(error_msg)
+
+
+def normalize_dialect(dialect: Optional[str]) -> Optional[str]:
+    """
+    Normalize dialect names to sqlglot-compatible names.
+    Converts common aliases to their sqlglot equivalents.
+    
+    Args:
+        dialect: Dialect name (may be None or an alias)
+    
+    Returns:
+        Normalized dialect name or None
+    """
+    if not dialect:
+        return None
+    
+    dialect_lower = dialect.lower().strip()
+    
+    # Map common aliases to sqlglot dialect names
+    dialect_map = {
+        'mssql': 'tsql',
+        'sqlserver': 'tsql',
+        'sql_server': 'tsql',
+        'sql-server': 'tsql',
+        't-sql': 'tsql',
+        'tsql': 'tsql',  # Already correct
+        'postgres': 'postgres',
+        'postgresql': 'postgres',
+        'mysql': 'mysql',
+        'snowflake': 'snowflake',
+        'oracle': 'oracle',
+        'bigquery': 'bigquery',
+        'big_query': 'bigquery',
+    }
+    
+    return dialect_map.get(dialect_lower, dialect)  # Return original if not in map
 
 
 def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Optional[str] = None, error_details: Optional[list] = None) -> list:
@@ -565,6 +601,9 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
         Only includes columns that have a table reference (no standalone columns or tables)
     """
     columns = []
+    
+    # Normalize dialect name (convert mssql -> tsql, etc.)
+    dialect = normalize_dialect(dialect)
     
     # If no dialect specified, try common dialects on parse failure
     # Note: 'tsql' is the sqlglot dialect name for SQL Server/MSSQL
@@ -875,7 +914,7 @@ def main():
     parser.add_argument(
         "--dialect",
         "-d",
-        help="SQL dialect (tsql for SQL Server/MSSQL, postgres, mysql, snowflake, oracle, bigquery, etc.)"
+        help="SQL dialect (tsql/mssql for SQL Server, postgres, mysql, snowflake, oracle, bigquery, etc.). Note: 'mssql' is automatically converted to 'tsql'."
     )
     parser.add_argument(
         "--output",
@@ -890,6 +929,10 @@ def main():
     )
     
     args = parser.parse_args()
+    
+    # Normalize dialect if provided (convert mssql -> tsql, etc.)
+    if args.dialect:
+        args.dialect = normalize_dialect(args.dialect)
     
     # Determine output directory and file names
     if args.output:
