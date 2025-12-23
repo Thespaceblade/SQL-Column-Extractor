@@ -1239,8 +1239,8 @@ def main():
                     for parse_err in file_error_details:
                         logger.warning(f"    Parse error: Statement {parse_err.get('statement', 'unknown')}, Dialect: {parse_err.get('dialect', 'unknown')}")
                 else:
-                logger.warning(f"  No unique columns found in {report_name} ({dataset}) - Total extracted: {len(columns)}, Wildcards filtered: {wildcard_count}")
-                files_with_zero_columns.append(zero_col_info)
+                    logger.warning(f"  No unique columns found in {report_name} ({dataset}) - Total extracted: {len(columns)}, Wildcards filtered: {wildcard_count}")
+                    files_with_zero_columns.append(zero_col_info)
                 
                 # Copy file with zero columns to Error_Reports directory
                 try:
