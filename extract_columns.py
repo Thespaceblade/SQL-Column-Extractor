@@ -183,17 +183,19 @@ def preprocess_sql(sql: str) -> str:
     
     # Handle DCS (Device Control String) sequences: ESC P ... ESC \
     # Used for device-specific controls
-    # Pattern: ESC P followed by any characters until ESC \
+    # Pattern: ESC P (no space between ESC and P) followed by any characters until ESC \
     sql = re.sub(r'\x1B P[^\x1B]*\x1B\\', '', sql)
     sql = re.sub(r'\033 P[^\x1B]*\x1B\\', '', sql)
     
     # Handle PM (Privacy Message) sequences: ESC ^ ... ESC \
-    sql = re.sub(r'\x1B \^[^\x1B]*\x1B\\', '', sql)
-    sql = re.sub(r'\033 \^[^\x1B]*\x1B\\', '', sql)
+    # Pattern: ESC ^ (no space) followed by any characters until ESC \
+    sql = re.sub(r'\x1B\^[^\x1B]*\x1B\\', '', sql)
+    sql = re.sub(r'\033\^[^\x1B]*\x1B\\', '', sql)
     
     # Handle APC (Application Program Command) sequences: ESC _ ... ESC \
-    sql = re.sub(r'\x1B _[^\x1B]*\x1B\\', '', sql)
-    sql = re.sub(r'\033 _[^\x1B]*\x1B\\', '', sql)
+    # Pattern: ESC _ (no space) followed by any characters until ESC \
+    sql = re.sub(r'\x1B_[^\x1B]*\x1B\\', '', sql)
+    sql = re.sub(r'\033_[^\x1B]*\x1B\\', '', sql)
     
     # Remove ANSI escape sequences that lost their escape character (just [...m, [...H, etc.)
     # Match [ followed by parameter bytes (0x30-0x3F), intermediate bytes (0x20-0x2F), final byte (0x40-0x7E)
@@ -983,7 +985,7 @@ def process_sql_file(filepath: Path, dialect: Optional[str] = None, error_detail
         if not content.strip():
             print(f"Warning: File {filepath} is empty", file=sys.stderr)
             return []
-        
+    
     # Preprocess SQL to handle edge cases
     content = preprocess_sql(content)
     
