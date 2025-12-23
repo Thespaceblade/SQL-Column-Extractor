@@ -1239,14 +1239,18 @@ def main():
                 if 'traceback' in file_info:
                     logger.error(f"Full traceback for {file_info['file']}:\n{file_info['traceback']}")
     
-    # Write errors to errors.txt file
+    # Write errors to errors.txt file (always write if there are any issues)
     if files_with_errors or files_with_zero_columns:
         try:
             with open(errors_file, 'w', encoding='utf-8') as f:
                 f.write("="*80 + "\n")
                 f.write("ERROR REPORT\n")
                 f.write("="*80 + "\n\n")
-                f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Total files processed: {len(sql_files)}\n")
+                f.write(f"Files with errors: {len(files_with_errors)}\n")
+                f.write(f"Files with 0 columns: {len(files_with_zero_columns)}\n")
+                f.write(f"Files successfully processed: {len(files_successful)}\n\n")
                 
                 if files_with_errors:
                     f.write(f"FILES WITH PROCESSING ERRORS ({len(files_with_errors)}):\n")
@@ -1285,7 +1289,11 @@ def main():
                             f.write(f"Reason: {file_info['total_extracted']} columns extracted but filtered ")
                             f.write(f"(wildcards: {file_info['wildcards_filtered']})\n")
                         else:
-                            f.write(f"Reason: No columns extracted (may be DDL-only or parse error)\n")
+                            # Check if this is a parse error or just DDL/empty
+                            if 'parse_errors' in file_info and file_info['parse_errors']:
+                                f.write(f"Reason: Parse error(s) prevented column extraction\n")
+                            else:
+                                f.write(f"Reason: No columns extracted (may be DDL-only, empty file, or parse error)\n")
                         
                         # Write detailed parse errors if available
                         if 'parse_errors' in file_info and file_info['parse_errors']:
