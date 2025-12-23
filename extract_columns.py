@@ -543,7 +543,8 @@ def format_parse_error(error: Exception, sql: str, dialect: Optional[str] = None
         error_msg.append("  - Ensure dialect-specific syntax is correct")
     
     if not dialect:
-        error_msg.append("  - Try specifying a dialect: --dialect postgres|mysql|tsql|snowflake")
+        error_msg.append("  - Try specifying a dialect: --dialect tsql|postgres|mysql|snowflake|oracle|bigquery")
+        error_msg.append("    (Note: 'tsql' is for SQL Server/MSSQL)")
     
     return "\n".join(error_msg)
 
@@ -566,7 +567,8 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
     columns = []
     
     # If no dialect specified, try common dialects on parse failure
-    dialects_to_try = [dialect] if dialect else [None, 'tsql', 'mssql', 'postgres', 'mysql', 'snowflake']
+    # Note: 'tsql' is the sqlglot dialect name for SQL Server/MSSQL
+    dialects_to_try = [dialect] if dialect else [None, 'tsql', 'postgres', 'mysql', 'snowflake', 'oracle', 'bigquery']
     
     last_error = None
     last_dialect = None
