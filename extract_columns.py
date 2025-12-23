@@ -175,6 +175,26 @@ def preprocess_sql(sql: str) -> str:
     ansi_escape_octal = re.compile(r'\033(?:[@-Z\\-_]|\[[0-?]*[/]*[@-~])')
     sql = ansi_escape_octal.sub('', sql)
     
+    # Handle OSC (Operating System Command) sequences: ESC ] ... BEL or ESC \
+    # Used for window titles, clipboard manipulation, etc.
+    # Pattern: ESC ] followed by any characters until BEL (0x07) or ESC \
+    sql = re.sub(r'\x1B\][^\x07\x1B]*(\x07|\x1B\\)', '', sql)
+    sql = re.sub(r'\033\][^\x07\x1B]*(\x07|\x1B\\)', '', sql)
+    
+    # Handle DCS (Device Control String) sequences: ESC P ... ESC \
+    # Used for device-specific controls
+    # Pattern: ESC P followed by any characters until ESC \
+    sql = re.sub(r'\x1B P[^\x1B]*\x1B\\', '', sql)
+    sql = re.sub(r'\033 P[^\x1B]*\x1B\\', '', sql)
+    
+    # Handle PM (Privacy Message) sequences: ESC ^ ... ESC \
+    sql = re.sub(r'\x1B \^[^\x1B]*\x1B\\', '', sql)
+    sql = re.sub(r'\033 \^[^\x1B]*\x1B\\', '', sql)
+    
+    # Handle APC (Application Program Command) sequences: ESC _ ... ESC \
+    sql = re.sub(r'\x1B _[^\x1B]*\x1B\\', '', sql)
+    sql = re.sub(r'\033 _[^\x1B]*\x1B\\', '', sql)
+    
     # Remove ANSI escape sequences that lost their escape character (just [...m, [...H, etc.)
     # Match [ followed by parameter bytes (0x30-0x3F), intermediate bytes (0x20-0x2F), final byte (0x40-0x7E)
     sql = re.sub(r'\[[\x20-\x3F]*[\x40-\x7E]', '', sql)
@@ -196,12 +216,20 @@ def preprocess_sql(sql: str) -> str:
     
     # Remove ASCII control characters (except newline \n=0x0A, tab \t=0x09, carriage return \r=0x0D)
     # Keep: \x09 (tab), \x0A (LF), \x0D (CR)
-    # Remove: \x00-\x08, \x0B-\x0C, \x0E-\x1F, \x7F
+    # Remove: \x00-\x08 (including BEL=0x07, BS=0x08), \x0B-\x0C, \x0E-\x1F, \x7F (DEL)
     sql = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', sql)
     
-    # Remove Unicode control characters and zero-width characters
-    # Zero-width space, zero-width non-joiner, zero-width joiner, left-to-right mark, right-to-left mark
-    sql = re.sub(r'[\u200B-\u200D\uFEFF\u200E\u200F]', '', sql)
+    # Remove Unicode control characters and zero-width characters comprehensively
+    # Zero-width space (\u200B), zero-width non-joiner (\u200C), zero-width joiner (\u200D)
+    # Left-to-right mark (\u200E), right-to-left mark (\u200F)
+    # BOM (\uFEFF), word joiner (\u2060), invisible separator (\u2063)
+    # Mathematical invisible characters (\u2061-\u2064)
+    # Line separator (\u2028), paragraph separator (\u2029)
+    # Various other Unicode control characters
+    sql = re.sub(r'[\u200B-\u200F\uFEFF\u2060\u2061-\u2064\u2028\u2029\u2066-\u2069\u061C\u2000-\u200A]', '', sql)
+    
+    # Remove other Unicode formatting characters (soft hyphen, etc.)
+    sql = re.sub(r'[\u00AD\u034F\u180E]', '', sql)
     
     # Remove BOM (Byte Order Mark) if present
     if sql.startswith('\ufeff'):
@@ -949,16 +977,16 @@ def process_sql_file(filepath: Path, dialect: Optional[str] = None, error_detail
         List of table.column references
     """
     try:
-        with open(filepath, "r", encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-        
+    with open(filepath, "r", encoding='utf-8', errors='ignore') as f:
+        content = f.read()
+    
         if not content.strip():
             print(f"Warning: File {filepath} is empty", file=sys.stderr)
             return []
         
-        # Preprocess SQL to handle edge cases
-        content = preprocess_sql(content)
-        
+    # Preprocess SQL to handle edge cases
+    content = preprocess_sql(content)
+    
         if not content.strip():
             print(f"Warning: File {filepath} contains only comments/DDL (no query statements)", file=sys.stderr)
             return []
@@ -1209,7 +1237,7 @@ def main():
                     for parse_err in file_error_details:
                         logger.warning(f"    Parse error: Statement {parse_err.get('statement', 'unknown')}, Dialect: {parse_err.get('dialect', 'unknown')}")
                 else:
-                    logger.warning(f"  No unique columns found in {report_name} ({dataset}) - Total extracted: {len(columns)}, Wildcards filtered: {wildcard_count}")
+                logger.warning(f"  No unique columns found in {report_name} ({dataset}) - Total extracted: {len(columns)}, Wildcards filtered: {wildcard_count}")
                 files_with_zero_columns.append(zero_col_info)
                 
                 # Copy file with zero columns to Error_Reports directory
