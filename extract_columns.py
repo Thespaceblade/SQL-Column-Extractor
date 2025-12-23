@@ -501,49 +501,93 @@ def format_parse_error(error: Exception, sql: str, dialect: Optional[str] = None
     
     error_msg.append("")
     
-    # Get error message
-    error_str = str(error)
-    error_msg.append(f"Error: {error_str}")
+    # Get error message - ParseError has better structure
+    line_num = None
+    col_num = None
     
-    # Try to extract line/column information from ParseError
     if isinstance(error, ParseError):
-        # ParseError may have line/col information
-        if hasattr(error, 'message'):
-            error_msg.append(f"Details: {error.message}")
+        # ParseError has an 'errors' attribute with structured error info
+        if hasattr(error, 'errors') and error.errors:
+            # Use the first error's description (most relevant)
+            first_error = error.errors[0]
+            error_description = first_error.get('description', str(error))
+            # Clean ANSI codes from error description
+            error_description = re.sub(r'\x1b\[[0-9;]*m', '', error_description)
+            error_description = re.sub(r'\033\[[0-9;]*m', '', error_description)
+            error_description = re.sub(r'\[[0-9;]*m', '', error_description)
+            error_msg.append(f"Error: {error_description}")
+            
+            # Extract line and column from error structure
+            line_num = first_error.get('line')
+            col_num = first_error.get('col')
+            
+            if line_num:
+                error_msg.append(f"Line: {line_num}")
+            if col_num:
+                error_msg.append(f"Column: {col_num}")
+        else:
+            # Fallback to string representation
+            error_str = str(error)
+            # Remove ANSI codes from error message if present
+            error_str = re.sub(r'\x1b\[[0-9;]*m', '', error_str)
+            error_str = re.sub(r'\033\[[0-9;]*m', '', error_str)
+            error_str = re.sub(r'\[[0-9;]*m', '', error_str)
+            error_msg.append(f"Error: {error_str}")
+            
+            # Try to find line number in error message
+            line_match = re.search(r'line\s+(\d+)', error_str, re.IGNORECASE)
+            col_match = re.search(r'col(umn)?\s+(\d+)', error_str, re.IGNORECASE)
+            
+            if line_match:
+                line_num = int(line_match.group(1))
+            if col_match:
+                col_num = int(col_match.group(2))
+    else:
+        # For non-ParseError exceptions
+        error_str = str(error)
+        # Remove ANSI codes from error message if present
+        error_str = re.sub(r'\x1b\[[0-9;]*m', '', error_str)
+        error_str = re.sub(r'\033\[[0-9;]*m', '', error_str)
+        error_str = re.sub(r'\[[0-9;]*m', '', error_str)
+        error_msg.append(f"Error: {error_str}")
         
         # Try to find line number in error message
-        import re
         line_match = re.search(r'line\s+(\d+)', error_str, re.IGNORECASE)
         col_match = re.search(r'col(umn)?\s+(\d+)', error_str, re.IGNORECASE)
         
         if line_match:
             line_num = int(line_match.group(1))
-            error_msg.append(f"Line: {line_num}")
-            
-            # Show context around the error line
-            sql_lines = sql.split('\n')
-            if 1 <= line_num <= len(sql_lines):
-                start_line = max(0, line_num - 3)
-                end_line = min(len(sql_lines), line_num + 2)
-                
-                error_msg.append("\nContext:")
-                for i in range(start_line, end_line):
-                    line_prefix = ">>> " if i == line_num - 1 else "    "
-                    error_msg.append(f"{line_prefix}{i+1:4d}: {sql_lines[i]}")
-        
         if col_match:
             col_num = int(col_match.group(2))
-            error_msg.append(f"Column: {col_num}")
+    
+    # Show context around error line if we have line number
+    if line_num:
+        sql_lines = sql.split('\n')
+        if 1 <= line_num <= len(sql_lines):
+            start_line = max(0, line_num - 3)
+            end_line = min(len(sql_lines), line_num + 2)
+            
+            error_msg.append("\nContext:")
+            for i in range(start_line, end_line):
+                line_prefix = ">>> " if i == line_num - 1 else "    "
+                error_msg.append(f"{line_prefix}{i+1:4d}: {sql_lines[i]}")
     
     # Common error suggestions
     error_msg.append("\nSuggestions:")
     
-    if "unexpected" in error_str.lower() or "syntax" in error_str.lower():
+    # Get error string for suggestions (use description if available, otherwise full error)
+    error_str_for_suggestions = ""
+    if isinstance(error, ParseError) and hasattr(error, 'errors') and error.errors:
+        error_str_for_suggestions = error.errors[0].get('description', str(error)).lower()
+    else:
+        error_str_for_suggestions = str(error).lower()
+    
+    if "unexpected" in error_str_for_suggestions or "syntax" in error_str_for_suggestions:
         error_msg.append("  - Check for missing commas, parentheses, or quotes")
         error_msg.append("  - Verify SQL syntax matches the specified dialect")
         error_msg.append("  - Check for unclosed quotes or parentheses")
     
-    if "unknown" in error_str.lower() or "invalid" in error_str.lower():
+    if "unknown" in error_str_for_suggestions or "invalid" in error_str_for_suggestions:
         error_msg.append("  - Verify table/column names are correct")
         error_msg.append("  - Check for reserved keywords that need quoting")
         error_msg.append("  - Ensure dialect-specific syntax is correct")
@@ -792,10 +836,15 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
             # Store error for this dialect attempt
             if error_details is not None:
                 formatted_error = format_parse_error(e, sql, try_dialect)
+                # Clean ANSI codes from error string
+                error_str = str(e)
+                error_str = re.sub(r'\x1b\[[0-9;]*m', '', error_str)
+                error_str = re.sub(r'\033\[[0-9;]*m', '', error_str)
+                error_str = re.sub(r'\[[0-9;]*m', '', error_str)
                 error_details.append({
                     'statement': 'all',
                     'dialect': try_dialect or 'generic',
-                    'error': str(e),
+                    'error': error_str,
                     'formatted': formatted_error
                 })
             # Try next dialect
@@ -806,10 +855,15 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
             # Store error for this dialect attempt
             if error_details is not None:
                 formatted_error = format_parse_error(e, sql, try_dialect)
+                # Clean ANSI codes from error string
+                error_str = str(e)
+                error_str = re.sub(r'\x1b\[[0-9;]*m', '', error_str)
+                error_str = re.sub(r'\033\[[0-9;]*m', '', error_str)
+                error_str = re.sub(r'\[[0-9;]*m', '', error_str)
                 error_details.append({
                     'statement': 'all',
                     'dialect': try_dialect or 'generic',
-                    'error': str(e),
+                    'error': error_str,
                     'formatted': formatted_error
                 })
             # Try next dialect
