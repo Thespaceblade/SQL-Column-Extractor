@@ -174,8 +174,8 @@ def preprocess_sql(sql: str) -> str:
     sql = re.sub(r'\x9B[^\x20-\x7E]*', '', sql)
     
     # Remove ANSI escape sequences that lost their escape character (just [...m, [...H, etc.)
-    # Match [ followed by optional numbers/semicolons, optional /, and ending character
-    sql = re.sub(r'\[[0-9;]*[/]*[@-~]', '', sql)
+    # Match [ followed by parameter bytes (0x30-0x3F), intermediate bytes (0x20-0x2F), final byte (0x40-0x7E)
+    sql = re.sub(r'\[[\x20-\x3F]*[\x40-\x7E]', '', sql)
     
     # Remove standalone escape characters that might be left behind
     sql = re.sub(r'[\x1B\x9B]', '', sql)  # ESC and CSI characters
