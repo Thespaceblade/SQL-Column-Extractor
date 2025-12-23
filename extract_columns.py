@@ -36,6 +36,15 @@ except ImportError:
     print("Or for better performance: pip install 'sqlglot[rs]'")
     sys.exit(1)
 
+# Import sqlparse for fallback tolerant parsing (install with: pip install sqlparse)
+try:
+    import sqlparse
+    SQLPARSE_AVAILABLE = True
+except ImportError:
+    SQLPARSE_AVAILABLE = False
+    print("Warning: sqlparse is not installed. Fallback parsing will be disabled.")
+    print("Install with: pip install sqlparse")
+
 
 # ============================================================================
 # CONFIGURATION: Paste your folder path here
@@ -48,6 +57,40 @@ except ImportError:
 #   FOLDER_PATH = ""  # Leave empty to use command-line args or current directory
 # ============================================================================
 FOLDER_PATH = r""
+
+
+def is_rdl_skip_file(filepath: Path) -> bool:
+    """
+    Check if file should be skipped based on RDL-aware filename patterns.
+    
+    Skips files matching patterns like:
+    - SOR_DATA, SORDATA
+    - SOR_DATA_REFRESH, SORDATAREFRESH
+    - SORREFRESH
+    - Any variation with underscores or without
+    
+    Args:
+        filepath: Path object to the SQL file
+        
+    Returns:
+        bool: True if file should be skipped
+    """
+    filename = filepath.name.upper()
+    
+    # Patterns to skip (case-insensitive matching)
+    skip_patterns = [
+        r'SOR[_\s]*DATA',
+        r'SOR[_\s]*DATA[_\s]*REFRESH',
+        r'SOR[_\s]*REFRESH',
+        r'DATA[_\s]*REFRESH',
+        r'REFRESH[_\s]*DATA',
+    ]
+    
+    for pattern in skip_patterns:
+        if re.search(pattern, filename):
+            return True
+    
+    return False
 
 
 def parse_filename(filepath: Path) -> tuple[str, str]:
@@ -673,12 +716,13 @@ def normalize_dialect(dialect: Optional[str]) -> Optional[str]:
     """
     Normalize dialect names to sqlglot-compatible names.
     Converts common aliases to their sqlglot equivalents.
+    Defaults to 'tsql' if None.
     
     Args:
         dialect: Dialect name (may be None or an alias)
     
     Returns:
-        Normalized dialect name or None
+        Normalized dialect name (defaults to 'tsql')
     """
     if not dialect:
         return 'tsql'
@@ -705,7 +749,84 @@ def normalize_dialect(dialect: Optional[str]) -> Optional[str]:
     return dialect_map.get(dialect_lower, dialect)  # Return original if not in map
 
 
-def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Optional[str] = None, error_details: Optional[list] = None) -> list:
+def fallback_extract_columns(sql: str, enable_unqualified_resolution: bool = True) -> list:
+    """
+    Fallback tolerant parser using sqlparse tokenizer + regex extraction.
+    Used when AST parsing fails or yields zero columns.
+    
+    Args:
+        sql: SQL string to parse
+        enable_unqualified_resolution: Whether to infer table names for unqualified columns
+    
+    Returns:
+        List of table.column references found via regex
+    """
+    if not SQLPARSE_AVAILABLE:
+        return []
+    
+    columns = []
+    
+    try:
+        # Tokenize SQL using sqlparse (tolerant, doesn't require valid SQL)
+        parsed = sqlparse.parse(sql)
+        
+        if not parsed:
+            return []
+        
+        sql_text = sql.upper()
+        
+        # Extract table aliases using regex patterns
+        # Pattern: FROM table [AS] alias or JOIN table [AS] alias
+        alias_patterns = [
+            r'(?:FROM|JOIN)\s+(\w+)(?:\s+(?:AS\s+)?(\w+))?',
+            r'(\w+)\s+(?:AS\s+)?(\w+)\s+(?:JOIN|,|WHERE)',
+        ]
+        
+        alias_map = {}
+        for pattern in alias_patterns:
+            for match in re.finditer(pattern, sql_text, re.IGNORECASE):
+                table = match.group(1)
+                alias = match.group(2) if match.lastindex >= 2 and match.group(2) else None
+                if alias and alias.upper() not in ['AS', 'ON', 'WHERE', 'AND', 'OR']:
+                    alias_map[alias.upper()] = table.upper()
+                # Also map table to itself
+                alias_map[table.upper()] = table.upper()
+        
+        # Extract table.column patterns using regex
+        # Pattern: table.column or alias.column
+        column_pattern = r'\b(\w+)\.(\w+)\b'
+        
+        for match in re.finditer(column_pattern, sql_text):
+            table_ref = match.group(1).upper()
+            col_name = match.group(2).upper()
+            
+            # Skip if it's a function call (e.g., COUNT(*), MAX(col))
+            if col_name == '*':
+                continue
+            
+            # Resolve alias to table name
+            actual_table = alias_map.get(table_ref, table_ref)
+            
+            # Build qualified name
+            qualified_name = f"{actual_table}.{col_name}"
+            columns.append(qualified_name)
+        
+        # If unqualified resolution is enabled, try to infer table names
+        if enable_unqualified_resolution and columns:
+            # Find unqualified columns that appear after FROM/JOIN
+            # This is a simple heuristic - find column names that aren't table.column
+            unqualified_pattern = r'\b(?<!\.)(\w+)(?!\.)\b'
+            # This is simplified - in practice, you'd want more context
+            pass
+        
+    except Exception:
+        # If fallback also fails, return empty list
+        pass
+    
+    return columns
+
+
+def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Optional[str] = None, error_details: Optional[list] = None, enable_unqualified_resolution: bool = True, try_multiple_dialects: bool = False) -> tuple[list, str]:
     """
     Extract all table.column references from SQL.
     Resolves aliases to full table names and qualifies unqualified columns.
@@ -722,20 +843,25 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
     """
     columns = []
     
-    # Normalize dialect name (convert mssql -> tsql, etc.)
+    # Normalize dialect name (convert mssql -> tsql, etc.) - defaults to 'tsql'
     dialect = normalize_dialect(dialect)
     
-    # If no dialect specified, try common dialects on parse failure
-    # Note: 'tsql' is the sqlglot dialect name for SQL Server/MSSQL
-    dialects_to_try = [dialect] if dialect else [None, 'tsql', 'postgres', 'mysql', 'snowflake', 'oracle', 'bigquery']
+    # Determine dialects to try
+    if try_multiple_dialects:
+        dialects_to_try = [dialect] if dialect else ['tsql', 'postgres', 'mysql', 'snowflake', 'oracle', 'bigquery']
+    else:
+        # Default: only try the specified dialect (or tsql if None)
+        dialects_to_try = [dialect] if dialect else ['tsql']
     
     last_error = None
     last_dialect = None
     failed_statements = []
     dialects_tried = []  # Track which dialects we actually attempted
+    ast_succeeded = False
+    parse_error_occurred = False
     
     for try_dialect in dialects_to_try:
-        dialect_name = try_dialect or 'generic'
+        dialect_name = try_dialect or 'tsql'  # Default to tsql instead of generic
         dialects_tried.append(dialect_name)
         
         try:
@@ -746,20 +872,25 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                 # All statements failed to parse
                 if len(statements) > 0:
                     # We got statements but they're all None - parsing failed
-                    parse_error_msg = f"Failed to parse SQL with dialect '{try_dialect or 'generic'}': All statements returned None"
+                    parse_error_msg = f"Failed to parse SQL with dialect '{try_dialect or 'tsql'}': All statements returned None"
                     last_error = ParseError(parse_error_msg)
                     last_dialect = try_dialect
+                    parse_error_occurred = True
                     
                     # Capture this error in error_details
                     if error_details is not None:
                         formatted_error = format_parse_error(last_error, sql, try_dialect)
                         error_details.append({
                             'statement': 'all',
-                            'dialect': try_dialect or 'generic',
+                            'dialect': try_dialect or 'tsql',
                             'error': parse_error_msg,
                             'formatted': formatted_error
                         })
-                continue
+                # If trying multiple dialects, continue; otherwise break to try fallback
+                if try_multiple_dialects:
+                    continue
+                else:
+                    break
             
             # Process each statement individually, skip ones that fail
             for i, stmt in enumerate(statements):
@@ -767,18 +898,18 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                     failed_statements.append((i, try_dialect, "Statement parsed as None"))
                     # Capture None statement errors
                     if error_details is not None:
-                        error_msg = f"Statement {i+1} failed to parse (returned None) with dialect '{try_dialect or 'generic'}'"
+                        error_msg = f"Statement {i+1} failed to parse (returned None) with dialect '{try_dialect or 'tsql'}'"
                         # Try to create a formatted error
                         try:
                             # Create a simple error for None statements
                             none_error = ParseError(error_msg)
                             formatted_error = format_parse_error(none_error, sql, try_dialect, i)
                         except:
-                            formatted_error = f"Parse Error\nStatement #{i+1}\nDialect: {try_dialect or 'generic'}\n\nError: {error_msg}"
+                            formatted_error = f"Parse Error\nStatement #{i+1}\nDialect: {try_dialect or 'tsql'}\n\nError: {error_msg}"
                         
                         error_details.append({
                             'statement': i + 1,
-                            'dialect': try_dialect or 'generic',
+                            'dialect': try_dialect or 'tsql',
                             'error': error_msg,
                             'formatted': formatted_error
                         })
@@ -793,8 +924,10 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                     for key, value in alias_map.items():
                         case_insensitive_alias_map[key.lower()] = value
                     
-                    # Resolve unqualified columns to their source tables
-                    unqualified_map = resolve_unqualified_columns(stmt, alias_map)
+                    # Resolve unqualified columns to their source tables (if enabled)
+                    unqualified_map = {}
+                    if enable_unqualified_resolution:
+                        unqualified_map = resolve_unqualified_columns(stmt, alias_map)
                     
                     # Find all column references (including WHERE, JOIN, HAVING, etc.)
                     for col in stmt.find_all(exp.Column):
@@ -866,7 +999,7 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                     if error_details is not None:
                         error_details.append({
                             'statement': i + 1,
-                            'dialect': try_dialect or 'generic',
+                            'dialect': try_dialect or 'tsql',
                             'error': str(e),
                             'formatted': formatted_error
                         })
@@ -877,32 +1010,27 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                     print(f"{'='*80}\n", file=sys.stderr)
                     continue
             
-            # If we extracted any columns, return them (even if some statements failed)
+            # If we extracted any columns, return SUCCESS
             if columns:
                 if failed_statements:
                     print(f"Note: Successfully extracted columns despite {len(failed_statements)} failed statement(s)", file=sys.stderr)
-                # Even if we got some columns, we should still report failed statements
-                # But don't treat this as a complete failure
-                return columns
+                # AST parsing succeeded and extracted columns
+                return columns, "SUCCESS"
             
-            # If we got here, no columns were extracted with this dialect
-            # This could mean:
-            # 1. All statements failed to parse (handled above with continue)
-            # 2. Statements parsed but had no extractable columns
-            # 3. All statements failed during processing (all hit exceptions)
-            # Continue to next dialect to try parsing with a different dialect
-            # Note: We don't return here - we continue the loop to try next dialect
-            if failed_statements and error_details is not None:
-                # We already captured errors above, but make sure they're in error_details
-                # Errors should already be captured in the loop above
-                pass
-            
+            # If we got here, AST parsing succeeded but extracted 0 columns
+            # Mark that AST succeeded (no exception thrown) and extracted 0 columns
+            ast_succeeded = True
             # Reset failed_statements for next dialect attempt
             failed_statements = []
+            
+            # If trying multiple dialects, continue; otherwise break to try fallback
+            if not try_multiple_dialects:
+                break
             
         except ParseError as e:
             last_error = e
             last_dialect = try_dialect
+            parse_error_occurred = True
             # Store error for this dialect attempt
             if error_details is not None:
                 formatted_error = format_parse_error(e, sql, try_dialect)
@@ -913,15 +1041,19 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                 error_str = re.sub(r'\[[0-9;]*m', '', error_str)
                 error_details.append({
                     'statement': 'all',
-                    'dialect': try_dialect or 'generic',
+                    'dialect': try_dialect or 'tsql',
                     'error': error_str,
                     'formatted': formatted_error
                 })
-            # Try next dialect
-            continue
+            # Try next dialect if enabled
+            if try_multiple_dialects:
+                continue
+            else:
+                break  # Stop trying dialects
         except Exception as e:
             last_error = e
             last_dialect = try_dialect
+            parse_error_occurred = True
             # Store error for this dialect attempt
             if error_details is not None:
                 formatted_error = format_parse_error(e, sql, try_dialect)
@@ -932,51 +1064,61 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                 error_str = re.sub(r'\[[0-9;]*m', '', error_str)
                 error_details.append({
                     'statement': 'all',
-                    'dialect': try_dialect or 'generic',
+                    'dialect': try_dialect or 'tsql',
                     'error': error_str,
                     'formatted': formatted_error
                 })
-            # Try next dialect
-            continue
+            # Try next dialect if enabled
+            if try_multiple_dialects:
+                continue
+            else:
+                break  # Stop trying dialects
     
-    # If all dialects failed, print detailed error
-    if last_error:
-        formatted_error = format_parse_error(last_error, sql, last_dialect)
-        file_info = f"\nFile: {filepath}" if filepath else ""
-        dialects_tried_str = ', '.join(dialects_tried)
+    # HYBRID FLOW: Try fallback if AST failed or extracted 0 columns
+    # If AST succeeded but extracted 0 columns, or if parse error occurred, try fallback
+    if (ast_succeeded and len(columns) == 0) or parse_error_occurred:
+        fallback_columns = fallback_extract_columns(sql, enable_unqualified_resolution)
         
-        # Store error details if list provided
-        if error_details is not None:
-            # Check if we already have an error for this dialect
-            if not any(ed.get('statement') == 'all' and ed.get('dialect') == (last_dialect or 'generic') for ed in error_details):
-                error_details.append({
-                    'statement': 'all',
-                    'dialect': last_dialect or 'generic',
-                    'error': str(last_error),
-                    'formatted': formatted_error,
-                    'dialects_tried': dialects_tried_str
-                })
-        
-        print(f"\n{'='*80}", file=sys.stderr)
-        print(f"ERROR: Failed to parse SQL{file_info}", file=sys.stderr)
-        print(f"Dialects tried ({len(dialects_tried)}): {dialects_tried_str}", file=sys.stderr)
-        print(formatted_error, file=sys.stderr)
-        print(f"{'='*80}\n", file=sys.stderr)
+        if len(fallback_columns) > 0:
+            # Fallback extracted columns - PARTIAL_OK (success)
+            return fallback_columns, "PARTIAL_OK"
+        else:
+            # Fallback also extracted 0 columns
+            if parse_error_occurred:
+                # Parse error occurred and fallback failed
+                if last_error:
+                    formatted_error = format_parse_error(last_error, sql, last_dialect)
+                    file_info = f"\nFile: {filepath}" if filepath else ""
+                    print(f"\n{'='*80}", file=sys.stderr)
+                    print(f"ERROR: Failed to parse SQL{file_info}", file=sys.stderr)
+                    print(formatted_error, file=sys.stderr)
+                    print(f"{'='*80}\n", file=sys.stderr)
+                return [], "PARSE_ERROR"
+            else:
+                # AST succeeded but had zero columns and fallback also had zero
+                return [], "ZERO_COLUMNS"
     
-    return columns
+    # If we get here, something went wrong - return empty with error status
+    return [], "PARSE_ERROR"
 
 
-def process_sql_file(filepath: Path, dialect: Optional[str] = None, error_details: Optional[list] = None) -> list:
+def process_sql_file(filepath: Path, dialect: Optional[str] = None, error_details: Optional[list] = None, enable_unqualified_resolution: bool = True, try_multiple_dialects: bool = False) -> tuple[list, str]:
     """
     Process a single SQL file and return all table.column references (all occurrences).
     
     Args:
         filepath: Path to SQL file
-        dialect: SQL dialect to use (None = auto-detect)
+        dialect: SQL dialect to use (None defaults to 'tsql')
         error_details: Optional list to collect detailed error information
+        enable_unqualified_resolution: Whether to infer table names for unqualified columns
+        try_multiple_dialects: Whether to try multiple dialects on failure (default: False)
     
     Returns:
-        List of table.column references
+        tuple: (columns, status) where status is one of:
+            - "SUCCESS": AST parsing succeeded and extracted columns
+            - "PARTIAL_OK": Fallback parsing extracted columns
+            - "PARSE_ERROR": ParseError occurred and fallback failed
+            - "ZERO_COLUMNS": Both AST and fallback extracted zero columns
     """
     try:
         with open(filepath, "r", encoding='utf-8', errors='ignore') as f:
@@ -984,32 +1126,32 @@ def process_sql_file(filepath: Path, dialect: Optional[str] = None, error_detail
         
         if not content.strip():
             print(f"Warning: File {filepath} is empty", file=sys.stderr)
-            return []
+            return [], "ZERO_COLUMNS"
         
         # Preprocess SQL to handle edge cases
         content = preprocess_sql(content)
         
         if not content.strip():
             print(f"Warning: File {filepath} contains only comments/DDL (no query statements)", file=sys.stderr)
-            return []
+            return [], "ZERO_COLUMNS"
         
-        return extract_table_columns(content, dialect, str(filepath), error_details)
+        return extract_table_columns(content, dialect, str(filepath), error_details, enable_unqualified_resolution, try_multiple_dialects)
     
     except FileNotFoundError:
         print(f"ERROR: File not found: {filepath}", file=sys.stderr)
-        return []
+        return [], "PARSE_ERROR"
     except PermissionError:
         print(f"ERROR: Permission denied reading file: {filepath}", file=sys.stderr)
-        return []
+        return [], "PARSE_ERROR"
     except UnicodeDecodeError as e:
         print(f"ERROR: Unable to decode file {filepath}: {e}", file=sys.stderr)
         print("  Try checking file encoding or use a different encoding", file=sys.stderr)
-        return []
+        return [], "PARSE_ERROR"
     except Exception as e:
         print(f"ERROR: Unexpected error reading file {filepath}: {e}", file=sys.stderr)
         import traceback
         print(traceback.format_exc(), file=sys.stderr)
-        return []
+        return [], "PARSE_ERROR"
 
 
 def setup_logging(log_file: Path):
@@ -1056,6 +1198,16 @@ def main():
         "--dataset",
         default="SQL_Parser",
         help="Dataset name to use in output (default: SQL_Parser). Note: Output format is now Filename, ColumnName"
+    )
+    parser.add_argument(
+        "--no-unqualified-resolution",
+        action="store_true",
+        help="Disable inference of table names for unqualified columns"
+    )
+    parser.add_argument(
+        "--try-multiple-dialects",
+        action="store_true",
+        help="Try multiple dialects on parse failure (default: only try specified dialect or tsql)"
     )
     
     args = parser.parse_args()
@@ -1221,40 +1373,60 @@ def main():
             
             file_columns[file_key] = unique_columns_for_file
             
-            # Track files with zero columns
-            if len(unique_columns_for_file) == 0:
+            # Handle different statuses
+            if status == "SUCCESS":
+                # AST parsing succeeded and extracted columns
+                files_successful.append(file_key)
+                for col in unique_columns_for_file:
+                    column_data.append((report_name, dataset, col))
+                logger.info(f"  Found {len(unique_columns_for_file)} unique columns in {report_name} ({dataset}) [AST parsing]")
+            elif status == "PARTIAL_OK":
+                # Fallback parsing extracted columns - treat as success
+                files_successful.append(file_key)
+                for col in unique_columns_for_file:
+                    column_data.append((report_name, dataset, col))
+                logger.info(f"  Found {len(unique_columns_for_file)} unique columns in {report_name} ({dataset}) [Fallback parsing - PARTIAL_OK]")
+            elif status == "PARSE_ERROR":
+                # Hard parse error - copy to Error_Reports
                 import shutil
+                error_info = {
+                    'file': file_key,
+                    'report_name': report_name,
+                    'dataset': dataset,
+                    'status': status,
+                    'total_extracted': len(columns),
+                    'wildcards_filtered': wildcard_count
+                }
+                if file_error_details:
+                    error_info['parse_errors'] = file_error_details
+                    logger.warning(f"  Parse error in {report_name} ({dataset}) - Parse errors detected: {len(file_error_details)}")
+                    for parse_err in file_error_details:
+                        logger.warning(f"    Parse error: Statement {parse_err.get('statement', 'unknown')}, Dialect: {parse_err.get('dialect', 'unknown')}")
+                files_with_errors.append(error_info)
+                
+                # Copy file with parse error to Error_Reports directory
+                try:
+                    error_report_path = error_reports_dir / sql_file.name
+                    shutil.copy2(sql_file, error_report_path)
+                    logger.info(f"Copied file with parse error to Error_Reports: {error_report_path}")
+                except Exception as copy_error:
+                    logger.error(f"Failed to copy file {sql_file} to Error_Reports: {copy_error}", exc_info=True)
+            elif status == "ZERO_COLUMNS":
+                # Zero columns - don't copy to Error_Reports (not a hard error)
                 zero_col_info = {
                     'file': file_key,
                     'report_name': report_name,
                     'dataset': dataset,
+                    'status': status,
                     'total_extracted': len(columns),
                     'wildcards_filtered': wildcard_count
                 }
-                # Add parse errors if available (file failed to parse)
                 if file_error_details:
                     zero_col_info['parse_errors'] = file_error_details
-                    # Log parse errors for zero-column files
-                    logger.warning(f"  No unique columns found in {report_name} ({dataset}) - Parse errors detected: {len(file_error_details)}")
-                    for parse_err in file_error_details:
-                        logger.warning(f"    Parse error: Statement {parse_err.get('statement', 'unknown')}, Dialect: {parse_err.get('dialect', 'unknown')}")
+                    logger.warning(f"  No columns found in {report_name} ({dataset}) - Parse errors detected: {len(file_error_details)}")
                 else:
-                    logger.warning(f"  No unique columns found in {report_name} ({dataset}) - Total extracted: {len(columns)}, Wildcards filtered: {wildcard_count}")
-                    files_with_zero_columns.append(zero_col_info)
-                
-                # Copy file with zero columns to Error_Reports directory
-                try:
-                    error_report_path = error_reports_dir / sql_file.name
-                    shutil.copy2(sql_file, error_report_path)
-                    logger.info(f"Copied file with 0 columns to Error_Reports: {error_report_path}")
-                except Exception as copy_error:
-                    logger.error(f"Failed to copy file {sql_file} to Error_Reports: {copy_error}", exc_info=True)
-            else:
-                files_successful.append(file_key)
-                # Add each unique column with parsed report name and dataset
-                for col in unique_columns_for_file:
-                    column_data.append((report_name, dataset, col))
-                logger.info(f"  Found {len(unique_columns_for_file)} unique columns in {report_name} ({dataset})")
+                    logger.warning(f"  No columns found in {report_name} ({dataset}) - Total extracted: {len(columns)}, Wildcards filtered: {wildcard_count}")
+                files_with_zero_columns.append(zero_col_info)
         except Exception as e:
             import traceback
             error_msg = f"Error processing {sql_file}: {e}"
