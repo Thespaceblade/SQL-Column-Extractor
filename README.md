@@ -61,7 +61,7 @@ python extract_columns.py sql_queries/ --output results.xlsx
 - `files`: SQL files or directories to process (default: current directory)
 - `--output`, `-o`: Output file path (default: `columns.csv`)
 - `--dialect`, `-d`: SQL dialect (postgres, mysql, tsql, snowflake, etc.)
-- `--dataset`: Dataset name (default: "SQL_Parser", not used in current output format)
+- `--dataset`: Dataset name (legacy option, not used - Dataset is extracted from filename)
 
 ### Examples
 
@@ -81,22 +81,61 @@ python extract_columns.py folder1/ folder2/ file.sql --output combined.xlsx
 
 ## Output Format
 
-The script generates a CSV or Excel file with two columns:
+The script generates a CSV or Excel file with three columns:
 
-- **Filename**: Relative path to the SQL file where the column was found
+- **ReportName**: The report name extracted from the SQL filename (part before `__`)
+- **Dataset**: The dataset name extracted from the SQL filename (part after `__`, or "Default" if no `__` found)
 - **ColumnName**: Fully qualified table.column reference (e.g., `employees.employee_id`)
+
+### Filename Parsing
+
+The script parses SQL filenames to extract Report Name and Dataset:
+- Format: `<report_name>__<dataset>.sql`
+- Example: `115_Hr_Inactive_Users_with_Active_accounts__AppNames.sql`
+  - ReportName: `115_Hr_Inactive_Users_with_Active_accounts`
+  - Dataset: `AppNames`
+- If no double underscore (`__`) is found, Dataset defaults to `"Default"`
 
 ### Example Output
 
-| Filename | ColumnName |
-|----------|------------|
-| queries/users.sql | users.user_id |
-| queries/users.sql | users.email |
-| queries/orders.sql | orders.order_id |
-| queries/orders.sql | orders.user_id |
-| queries/orders.sql | orders.total |
+| ReportName | Dataset | ColumnName |
+|------------|---------|------------|
+| 115_Hr_Inactive_Users_with_Active_accounts | AppNames | users.user_id |
+| 115_Hr_Inactive_Users_with_Active_accounts | AppNames | users.email |
+| 200_Customer_Orders | Default | orders.order_id |
+| 200_Customer_Orders | Default | orders.user_id |
 
-Each row represents one column reference occurrence. If the same column appears multiple times in a file, it will appear on multiple rows.
+Each row represents one unique column reference per file. Duplicate columns within the same file are removed, but the same column can appear in multiple rows if it exists in different files.
+
+### Detailed Example
+
+**Input SQL File**: `115_Hr_Inactive_Users_with_Active_accounts__AppNames.sql`
+```sql
+SELECT employee_id, first_name, email
+FROM employees
+WHERE status = 'active';
+```
+
+**Output CSV**:
+```csv
+ReportName,Dataset,ColumnName
+115_Hr_Inactive_Users_with_Active_accounts,AppNames,employees.employee_id
+115_Hr_Inactive_Users_with_Active_accounts,AppNames,employees.first_name
+115_Hr_Inactive_Users_with_Active_accounts,AppNames,employees.email
+115_Hr_Inactive_Users_with_Active_accounts,AppNames,employees.status
+```
+
+**Input SQL File** (no double underscore): `simple_query.sql`
+```sql
+SELECT id, name FROM users;
+```
+
+**Output CSV**:
+```csv
+ReportName,Dataset,ColumnName
+simple_query,Default,users.id
+simple_query,Default,users.name
+```
 
 ## How It Works
 
@@ -105,7 +144,9 @@ Each row represents one column reference occurrence. If the same column appears 
 3. **Alias Resolution**: Builds a map of table aliases to actual table names
 4. **Column Extraction**: Traverses the AST to find all column references
 5. **Qualification**: Resolves unqualified columns to their source tables
-6. **Output**: Writes results to CSV or Excel format
+6. **Filename Parsing**: Extracts Report Name and Dataset from SQL filename
+7. **Deduplication**: Removes duplicate columns within each file (keeps unique per file)
+8. **Output**: Writes results to CSV or Excel format with ReportName, Dataset, ColumnName columns
 
 ## Supported SQL Features
 
