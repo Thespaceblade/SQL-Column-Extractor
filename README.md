@@ -58,9 +58,12 @@ python extract_columns.py sql_queries/ --output results.xlsx
 
 ### Command Line Options
 
-- `files`: SQL files or directories to process (default: current directory)
-- `--output`, `-o`: Output file path (default: `columns.csv`)
-- `--dialect`, `-d`: SQL dialect (postgres, mysql, tsql, snowflake, etc.)
+- `files`: SQL files or directories to process (default: current directory, searches recursively)
+- `--output`, `-o`: Output file path or directory (default: `output/columns.csv`)
+  - If a file path: Creates parent directory and uses that filename
+  - If a directory: Creates CSV file named `columns.csv` in that directory
+  - If not specified: Creates `output/` directory in current location
+- `--dialect`, `-d`: SQL dialect (postgres, mysql, tsql, snowflake, oracle, etc.)
 - `--dataset`: Dataset name (legacy option, not used - Dataset is extracted from filename)
 
 ### Examples
@@ -78,6 +81,22 @@ python extract_columns.py queries/ --dialect tsql --output output.csv
 # Process multiple folders/files
 python extract_columns.py folder1/ folder2/ file.sql --output combined.xlsx
 ```
+
+## Output Structure
+
+The script creates an `output/` folder (or uses the specified output directory) containing:
+
+- **CSV/Excel file**: The main output with extracted columns
+- **Log file**: Detailed processing log with timestamps
+- **errors.txt**: Comprehensive error report
+- **Error_Reports/**: Subfolder containing copies of files that had errors or found 0 columns
+
+### Error Handling
+
+Files that cannot be parsed correctly or find 0 columns are:
+- Copied (not moved) to `Error_Reports/` subfolder
+- Logged with full details
+- Added to `errors.txt` report
 
 ## Output Format
 
@@ -146,7 +165,9 @@ simple_query,Default,users.name
 5. **Qualification**: Resolves unqualified columns to their source tables
 6. **Filename Parsing**: Extracts Report Name and Dataset from SQL filename
 7. **Deduplication**: Removes duplicate columns within each file (keeps unique per file)
-8. **Output**: Writes results to CSV or Excel format with ReportName, Dataset, ColumnName columns
+8. **Error Tracking**: Copies problematic files to `Error_Reports/` and logs details
+9. **Output**: Writes results to CSV or Excel format with ReportName, Dataset, ColumnName columns
+10. **Error Reporting**: Generates comprehensive error report in `errors.txt`
 
 ## Supported SQL Features
 
@@ -159,11 +180,32 @@ simple_query,Default,users.name
 - WHERE, HAVING, GROUP BY, ORDER BY clauses
 - UNION, INTERSECT, EXCEPT operations
 
+## Output Files
+
+When you run the script, it creates an output directory structure:
+
+```
+output/
+├── columns.csv          # Main output file (or specified filename)
+├── columns.log          # Detailed processing log
+├── errors.txt           # Error report with all problematic files
+└── Error_Reports/      # Copies of files with errors or 0 columns
+    ├── error_file1.sql
+    ├── zero_columns.sql
+    └── ...
+```
+
+The `errors.txt` file contains:
+- List of files with processing errors (with full tracebacks)
+- List of files with 0 columns found (with reasons)
+- Total counts and summary statistics
+
 ## Limitations
 
 - Unqualified columns in multi-table queries may not be resolved if the table cannot be determined from context
 - Some SQL dialects may require explicit `--dialect` specification
 - Very large SQL files may take longer to process
+- Files with errors are copied (not moved) to Error_Reports for review
 
 ## Requirements
 
