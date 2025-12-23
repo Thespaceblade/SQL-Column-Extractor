@@ -9,12 +9,19 @@ Extract table.column references from SQL files and output to CSV/Excel format. P
 - Handles unqualified columns by inferring table names from context
 - Processes folders recursively (searches all subdirectories)
 - Supports complex SQL features:
-  - CTEs (Common Table Expressions)
+  - CTEs (Common Table Expressions), including recursive CTEs
   - Subqueries and derived tables
-  - JOINs (INNER, LEFT, RIGHT, FULL OUTER)
-  - Window functions
+  - JOINs (INNER, LEFT, RIGHT, FULL OUTER, LATERAL, CROSS APPLY)
+  - Window functions with PARTITION BY
+  - PIVOT and UNPIVOT operations
+  - Table-valued functions
+  - Correlated subqueries
   - WHERE, HAVING, and JOIN conditions
+  - Set operations (UNION, INTERSECT, EXCEPT)
+  - NATURAL JOINs and USING clauses
 - Case-insensitive alias resolution
+- Advanced unqualified column resolution (checks JOIN conditions, WHERE clauses)
+- Multi-dialect support with automatic fallback
 - Preprocesses SQL to handle edge cases:
   - Removes SQL comments
   - Removes DDL statements (CREATE, ALTER, DROP)
