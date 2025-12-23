@@ -581,14 +581,42 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                 # All statements failed to parse
                 if len(statements) > 0:
                     # We got statements but they're all None - parsing failed
-                    last_error = ParseError(f"Failed to parse SQL with dialect '{try_dialect or 'generic'}': All statements returned None")
+                    parse_error_msg = f"Failed to parse SQL with dialect '{try_dialect or 'generic'}': All statements returned None"
+                    last_error = ParseError(parse_error_msg)
                     last_dialect = try_dialect
+                    
+                    # Capture this error in error_details
+                    if error_details is not None:
+                        formatted_error = format_parse_error(last_error, sql, try_dialect)
+                        error_details.append({
+                            'statement': 'all',
+                            'dialect': try_dialect or 'generic',
+                            'error': parse_error_msg,
+                            'formatted': formatted_error
+                        })
                 continue
             
             # Process each statement individually, skip ones that fail
             for i, stmt in enumerate(statements):
                 if stmt is None:
                     failed_statements.append((i, try_dialect, "Statement parsed as None"))
+                    # Capture None statement errors
+                    if error_details is not None:
+                        error_msg = f"Statement {i+1} failed to parse (returned None) with dialect '{try_dialect or 'generic'}'"
+                        # Try to create a formatted error
+                        try:
+                            # Create a simple error for None statements
+                            none_error = ParseError(error_msg)
+                            formatted_error = format_parse_error(none_error, sql, try_dialect, i)
+                        except:
+                            formatted_error = f"Parse Error\nStatement #{i+1}\nDialect: {try_dialect or 'generic'}\n\nError: {error_msg}"
+                        
+                        error_details.append({
+                            'statement': i + 1,
+                            'dialect': try_dialect or 'generic',
+                            'error': error_msg,
+                            'formatted': formatted_error
+                        })
                     continue
                 
                 try:
@@ -688,7 +716,19 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
             if columns:
                 if failed_statements:
                     print(f"Note: Successfully extracted columns despite {len(failed_statements)} failed statement(s)", file=sys.stderr)
+                # Even if we got some columns, we should still report failed statements
+                # But don't treat this as a complete failure
                 return columns
+            
+            # If we got here, no columns were extracted
+            # This could mean:
+            # 1. All statements failed to parse
+            # 2. Statements parsed but had no extractable columns
+            # If we have failed_statements, that's a parse error
+            if failed_statements and error_details is not None:
+                # We already captured errors above, but make sure they're in error_details
+                # Errors should already be captured in the loop above
+                pass
             
         except ParseError as e:
             last_error = e
@@ -990,8 +1030,13 @@ def main():
                 # Add parse errors if available (file failed to parse)
                 if file_error_details:
                     zero_col_info['parse_errors'] = file_error_details
+                    # Log parse errors for zero-column files
+                    logger.warning(f"  No unique columns found in {report_name} ({dataset}) - Parse errors detected: {len(file_error_details)}")
+                    for parse_err in file_error_details:
+                        logger.warning(f"    Parse error: Statement {parse_err.get('statement', 'unknown')}, Dialect: {parse_err.get('dialect', 'unknown')}")
+                else:
+                    logger.warning(f"  No unique columns found in {report_name} ({dataset}) - Total extracted: {len(columns)}, Wildcards filtered: {wildcard_count}")
                 files_with_zero_columns.append(zero_col_info)
-                logger.warning(f"  No unique columns found in {report_name} ({dataset}) - Total extracted: {len(columns)}, Wildcards filtered: {wildcard_count}")
                 
                 # Copy file with zero columns to Error_Reports directory
                 try:
