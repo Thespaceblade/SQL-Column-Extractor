@@ -18,6 +18,7 @@ import sys
 import csv
 import re
 import html
+import urllib.parse
 import logging
 import shutil
 from pathlib import Path
@@ -126,6 +127,60 @@ def parse_filename(filepath: Path) -> tuple[str, str]:
     return report_name, dataset
 
 
+def decode_html_entities(sql: str) -> str:
+    """
+    Convert HTML encoded characters to their actual symbols.
+    
+    Handles:
+    - HTML entities: &gt; -> >, &lt; -> <, &amp; -> &, &quot; -> ", &apos; -> ', etc.
+    - Numeric entities: &#60; -> <, &#62; -> >, &#38; -> &, etc.
+    - Hex entities: &#x3C; -> <, &#x3E; -> >, &#x26; -> &, etc.
+    - URL-encoded characters: %3E -> >, %3C -> <, %26 -> &, etc.
+    
+    Args:
+        sql: SQL string that may contain HTML/URL encoded characters
+        
+    Returns:
+        SQL string with HTML/URL encoded characters decoded
+    """
+    # First decode HTML entities using standard library
+    sql = html.unescape(sql)
+    
+    # Decode URL-encoded characters (like %3E, %3C, %26, etc.)
+    # Common SQL-related URL encodings:
+    # %3E = >, %3C = <, %3D = =, %26 = &, %27 = ', %22 = ", %20 = space
+    try:
+        sql = urllib.parse.unquote(sql)
+    except Exception:
+        # If URL decoding fails, continue with what we have
+        pass
+    
+    # Handle any remaining numeric/hex HTML entities that html.unescape might have missed
+    # This is a fallback for edge cases
+    html_entity_map = {
+        '&gt;': '>',
+        '&lt;': '<',
+        '&amp;': '&',
+        '&quot;': '"',
+        '&apos;': "'",
+        '&#39;': "'",
+        '&#x27;': "'",
+        '&#x22;': '"',
+        '&#x26;': '&',
+        '&#x3C;': '<',
+        '&#x3E;': '>',
+        '&#60;': '<',
+        '&#62;': '>',
+        '&#38;': '&',
+        '&#34;': '"',
+    }
+    
+    for entity, char in html_entity_map.items():
+        sql = sql.replace(entity, char)
+    
+    return sql
+
+
 def preprocess_sql(sql: str) -> str:
     """
     Preprocess SQL to handle edge cases and remove problematic syntax.
@@ -146,7 +201,7 @@ def preprocess_sql(sql: str) -> str:
     - Normalize whitespace
     """
     # Decode HTML entities first (before removing other things)
-    sql = html.unescape(sql)
+    sql = decode_html_entities(sql)
     
     # Remove SQL comments (-- style) - must come before other processing
     sql = re.sub(r'--.*?$', '', sql, flags=re.MULTILINE)
