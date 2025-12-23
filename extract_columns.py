@@ -846,7 +846,7 @@ def main():
     parser.add_argument(
         "--dialect",
         "-d",
-        help="SQL dialect (postgres, mysql, snowflake, etc.)"
+        help="SQL dialect (tsql for SQL Server/MSSQL, postgres, mysql, snowflake, oracle, bigquery, etc.)"
     )
     parser.add_argument(
         "--output",
