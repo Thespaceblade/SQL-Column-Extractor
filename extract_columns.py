@@ -372,11 +372,197 @@ def strip_brackets(identifier):
     return identifier_str
 
 
+def build_scope_alias_maps(stmt: exp.Expression) -> dict:
+    """
+    Build scope-aware alias maps where each SELECT scope has its own alias map.
+    Returns dict mapping select_node_id -> alias_map for that scope.
+    Also returns a global CTE names set.
+    
+    This handles alias shadowing where the same alias is used in different scopes.
+    """
+    scope_maps = {}  # id(select_node) -> {alias -> table}
+    cte_names = set()
+    
+    # First pass: collect all CTE names globally
+    for cte in stmt.find_all(exp.CTE):
+        if cte.alias:
+            cte_name = cte.alias if isinstance(cte.alias, str) else cte.alias.name if hasattr(cte.alias, 'name') else str(cte.alias)
+            if cte_name:
+                cte_names.add(strip_brackets(cte_name) if isinstance(cte_name, str) else cte_name)
+    
+    def extract_table_alias_for_scope(table_expr, local_alias_map, context_cte_names=None):
+        """Extract table name and alias from a table expression into local scope map."""
+        if context_cte_names is None:
+            context_cte_names = set()
+        
+        if isinstance(table_expr, exp.Table):
+            table_name = table_expr.name
+            if not table_name:
+                return
+            
+            # Strip brackets from catalog, db, and table name before building qualified name
+            parts = []
+            if table_expr.catalog:
+                catalog_clean = strip_brackets(table_expr.catalog)
+                parts.append(catalog_clean)
+            if table_expr.db:
+                db_clean = strip_brackets(table_expr.db)
+                parts.append(db_clean)
+            if table_name:
+                table_name_clean = strip_brackets(table_name)
+                parts.append(table_name_clean)
+            
+            full_table_name = ".".join(parts) if parts else table_name_clean
+            alias = table_expr.alias
+            alias_name = None
+            if alias:
+                if isinstance(alias, exp.TableAlias):
+                    alias_this = alias.this
+                    if isinstance(alias_this, exp.Identifier):
+                        alias_name = alias_this.name
+                    elif isinstance(alias_this, str):
+                        alias_name = alias_this
+                    else:
+                        alias_name = str(alias_this)
+                elif isinstance(alias, str):
+                    alias_name = alias
+                else:
+                    alias_name = str(alias)
+            
+            # Use cleaned table name for CTE check
+            if table_name_clean in cte_names or table_name_clean in context_cte_names:
+                resolved_name = table_name_clean
+            else:
+                resolved_name = full_table_name
+            
+            if alias_name:
+                # Strip brackets from alias name before storing
+                alias_name_clean = strip_brackets(alias_name)
+                local_alias_map[alias_name_clean] = resolved_name
+                local_alias_map[alias_name_clean.lower()] = resolved_name
+                if alias_name != alias_name_clean:
+                    local_alias_map[alias_name] = resolved_name
+                    if isinstance(alias_name, str):
+                        local_alias_map[alias_name.lower()] = resolved_name
+            
+            # Store table name as well
+            local_alias_map[table_name_clean] = resolved_name
+            if isinstance(table_name_clean, str):
+                local_alias_map[table_name_clean.lower()] = resolved_name
+            if table_name != table_name_clean:
+                local_alias_map[table_name] = resolved_name
+                if isinstance(table_name, str):
+                    local_alias_map[table_name.lower()] = resolved_name
+        
+        elif isinstance(table_expr, (exp.Subquery, exp.Lateral)):
+            # Handle subqueries, derived tables, CROSS APPLY, OUTER APPLY
+            alias = table_expr.alias
+            if alias:
+                if isinstance(alias, exp.TableAlias):
+                    alias_this = alias.this
+                    if isinstance(alias_this, exp.Identifier):
+                        alias_name = alias_this.name
+                    elif isinstance(alias_this, str):
+                        alias_name = alias_this
+                    else:
+                        alias_name = str(alias_this)
+                elif isinstance(alias, str):
+                    alias_name = alias
+                else:
+                    alias_name = str(alias)
+                
+                if alias_name:
+                    alias_name_clean = strip_brackets(alias_name)
+                    local_alias_map[alias_name_clean] = alias_name_clean
+                    local_alias_map[alias_name_clean.lower()] = alias_name_clean
+    
+    def build_scope_map(select_node, parent_scope_id=None):
+        """Build alias map for a single SELECT scope, inheriting from parent."""
+        # Start with copy of parent scope's aliases (inheritance)
+        if parent_scope_id and parent_scope_id in scope_maps:
+            local_map = dict(scope_maps[parent_scope_id])
+        else:
+            local_map = {}
+        
+        # Add CTE names
+        for cte_name in cte_names:
+            local_map[cte_name] = cte_name
+            if isinstance(cte_name, str):
+                local_map[cte_name.lower()] = cte_name
+        
+        # Extract tables from FROM clause
+        from_expr = select_node.args.get("from") or select_node.args.get("from_")
+        if from_expr:
+            if isinstance(from_expr, exp.From):
+                extract_table_alias_for_scope(from_expr.this, local_map, cte_names)
+            elif isinstance(from_expr, exp.Table):
+                extract_table_alias_for_scope(from_expr, local_map, cte_names)
+        
+        # Extract tables from JOINs
+        for join in select_node.args.get("joins", []):
+            if isinstance(join, exp.Join):
+                extract_table_alias_for_scope(join.this, local_map, cte_names)
+        
+        # Store this scope's map
+        scope_maps[id(select_node)] = local_map
+        return id(select_node)
+    
+    def process_expression(expr, parent_scope_id=None):
+        """Recursively process expression tree building scope maps."""
+        if isinstance(expr, exp.Select):
+            # Build scope map for this SELECT
+            current_scope_id = build_scope_map(expr, parent_scope_id)
+            # Process nested expressions with current scope as parent
+            for child in expr.walk():
+                if child != expr:
+                    if isinstance(child, exp.Select):
+                        process_expression(child, current_scope_id)
+        elif isinstance(expr, (exp.Union, exp.Except, exp.Intersect)):
+            if expr.this:
+                process_expression(expr.this, parent_scope_id)
+            if expr.expression:
+                process_expression(expr.expression, parent_scope_id)
+        elif isinstance(expr, exp.CTE):
+            if expr.this:
+                process_expression(expr.this, parent_scope_id)
+    
+    # Process the main statement
+    if isinstance(stmt, exp.Select):
+        process_expression(stmt)
+    else:
+        # Process all SELECT statements in order
+        for select in stmt.find_all(exp.Select):
+            # Only process top-level SELECTs (others handled recursively)
+            parent = select.parent
+            is_top_level = not isinstance(parent, (exp.Select, exp.Subquery))
+            if is_top_level or id(select) not in scope_maps:
+                process_expression(select)
+    
+    return scope_maps, cte_names
+
+
+def get_scope_for_column(col: exp.Column, scope_maps: dict) -> dict:
+    """
+    Find the appropriate scope (alias map) for a given column by walking up the AST.
+    Returns the alias map for the closest containing SELECT.
+    """
+    node = col
+    while node:
+        if isinstance(node, exp.Select) and id(node) in scope_maps:
+            return scope_maps[id(node)]
+        node = node.parent
+    # Return empty dict if no scope found
+    return {}
+
+
 def build_alias_map(stmt: exp.Expression) -> dict:
     """
     Build a mapping of table aliases to actual table/CTE names.
     Returns dict mapping alias -> full_table_name or cte_name
     Handles all cases: FROM aliases, JOIN aliases, CTE aliases, subquery aliases
+    
+    NOTE: This function builds a FLAT alias map (last definition wins).
+    For scope-aware resolution, use build_scope_alias_maps() instead.
     
     Strips brackets from schema and table names to ensure clean alias mapping.
     """
@@ -987,7 +1173,10 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                     continue
                 
                 try:
-                    # Build alias mapping for this statement
+                    # Build scope-aware alias maps for this statement
+                    scope_maps, global_cte_names = build_scope_alias_maps(stmt)
+                    
+                    # Also build flat alias map for fallback (last definition wins)
                     alias_map = build_alias_map(stmt)
                     
                     # Create case-insensitive alias map
@@ -1080,10 +1269,19 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                             
                             # If column had a table reference originally, verify it can be resolved
                             # (Skip columns with unresolvable table references, but include unqualified columns)
+                            
+                            # Get scope-specific alias map for this column
+                            scope_alias_map = get_scope_for_column(col, scope_maps)
+                            # Create case-insensitive version of scope alias map
+                            scope_ci_map = {k.lower(): v for k, v in scope_alias_map.items()} if scope_alias_map else {}
+                            
                             if not was_unqualified:
                                 # Column had a table reference - check if it's resolvable
                                 table_name_str = table_name if isinstance(table_name, str) else str(table_name)
-                                resolved_table_check = (case_insensitive_alias_map.get(table_name_str.lower()) or 
+                                # Try scope-aware lookup first, then fall back to global
+                                resolved_table_check = (scope_ci_map.get(table_name_str.lower()) or
+                                                       scope_alias_map.get(table_name_str) or
+                                                       case_insensitive_alias_map.get(table_name_str.lower()) or 
                                                        alias_map.get(table_name_str))
                                 # If table reference can't be resolved and isn't a direct table name from FROM clause,
                                 # skip it (This handles cases like nonexistent_table.column)
@@ -1093,6 +1291,8 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                                     # or if it appears as part of a resolved name
                                     is_known_table = (table_name_str in alias_map or 
                                                      table_name_str.lower() in case_insensitive_alias_map or
+                                                     table_name_str in scope_alias_map or
+                                                     table_name_str.lower() in scope_ci_map or
                                                      any(table_name_str.lower() in str(v).lower() for v in alias_map.values()))
                                     if not is_known_table:
                                         # Table reference doesn't exist and isn't a known table - skip it
@@ -1106,8 +1306,10 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                             if col.catalog:
                                 # Strip brackets from catalog before processing
                                 catalog_str = strip_brackets(col.catalog if isinstance(col.catalog, str) else str(col.catalog))
-                                # Check if catalog is actually an alias
-                                resolved_catalog = (case_insensitive_alias_map.get(catalog_str.lower()) or 
+                                # Check if catalog is actually an alias - use scope-aware lookup first
+                                resolved_catalog = (scope_ci_map.get(catalog_str.lower()) or
+                                                   scope_alias_map.get(catalog_str) or
+                                                   case_insensitive_alias_map.get(catalog_str.lower()) or 
                                                    alias_map.get(catalog_str))
                                 if resolved_catalog:
                                     # It's an alias - resolve it (might be multi-part)
@@ -1125,8 +1327,10 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                             if col.db:
                                 # Strip brackets from db before processing
                                 db_str = strip_brackets(col.db if isinstance(col.db, str) else str(col.db))
-                                # Check if db is actually an alias
-                                resolved_db = (case_insensitive_alias_map.get(db_str.lower()) or 
+                                # Check if db is actually an alias - use scope-aware lookup first
+                                resolved_db = (scope_ci_map.get(db_str.lower()) or
+                                              scope_alias_map.get(db_str) or
+                                              case_insensitive_alias_map.get(db_str.lower()) or 
                                               alias_map.get(db_str))
                                 if resolved_db:
                                     # It's an alias - resolve it
@@ -1169,7 +1373,10 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                                 # db already contains the table name, skip col.table
                                 resolved_table = None
                             else:
-                                resolved_table = (case_insensitive_alias_map.get(table_name_str.lower()) or 
+                                # Use scope-aware lookup first, then fall back to global
+                                resolved_table = (scope_ci_map.get(table_name_str.lower()) or
+                                                 scope_alias_map.get(table_name_str) or
+                                                 case_insensitive_alias_map.get(table_name_str.lower()) or 
                                                  alias_map.get(table_name_str))
                             
                             if resolved_table:
