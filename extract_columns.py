@@ -339,10 +339,6 @@ def preprocess_sql(sql: str) -> str:
     if sql is None or not isinstance(sql, str):
         return ""
     
-    # Extract SELECT statements from IF/BEGIN/END blocks BEFORE other preprocessing
-    # This ensures we don't lose SELECT statements inside procedural code that sqlglot can't parse
-    sql = extract_select_statements_from_blocks(sql)
-    
     sql = decode_html_entities(sql)
     
     # Handle BOM variants (UTF-8, UTF-16 BE/LE)
@@ -354,8 +350,15 @@ def preprocess_sql(sql: str) -> str:
     # Normalize line endings to LF (handle CRLF, CR, LF)
     sql = sql.replace('\r\n', '\n').replace('\r', '\n')
     
+    # Remove comments BEFORE extracting SELECT statements
+    # This prevents commented SELECT statements from being extracted
     sql = re.sub(r'--.*?$', '', sql, flags=re.MULTILINE)
     sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
+    
+    # Extract SELECT statements from IF/BEGIN/END blocks AFTER comment removal
+    # This ensures we don't lose SELECT statements inside procedural code that sqlglot can't parse
+    # and we don't extract commented SELECT statements
+    sql = extract_select_statements_from_blocks(sql)
     sql = re.sub(r'(?i)(?:^|[\n;])\s*USE\s+[^\s;]+(?:\s*;)?\s*(?=[\n;]|$|\s)', '', sql, flags=re.MULTILINE)
     sql = re.sub(r'(?i)(?:^|[\n;]|\s)\s*GO\s+\d+\s*(?=[\n;]|$|\s)', '', sql, flags=re.MULTILINE)
     sql = re.sub(r'(?i)(?:^|[\n;]|\s)\s*GO\s*;?\s*(?=[\n;]|$|\s)', '', sql, flags=re.MULTILINE)
