@@ -299,9 +299,6 @@ def preprocess_sql(sql: str) -> str:
     # Remove non-breaking spaces and other Unicode spaces
     sql = re.sub(r'[\u00A0\u2000-\u200B\u202F\u205F\u3000]', ' ', sql)
     
-    # Remove other non-printable Unicode characters (but keep common punctuation and letters)
-    sql = re.sub(r'[^\x20-\x7E\n\r\t]', '', sql)
-    
     # Normalize whitespace
     sql = re.sub(r'[ \t]+', ' ', sql)
     sql = re.sub(r'\n{2,}', '\n', sql)
@@ -730,6 +727,13 @@ def fallback_extract_columns(sql: str, enable_unqualified_resolution: bool = Tru
     Fallback tolerant parser using sqlparse tokenizer + regex extraction.
     Used when AST parsing fails or yields zero columns.
     
+    Handles bracket/quote/backtick-aware identifiers:
+    - [schema].[table].[column] - SQL Server bracketed
+    - "schema"."table"."column" - double-quoted (ANSI)
+    - `schema`.`table`.`column` - backtick (MySQL)
+    - schema.table.column - unquoted
+    - Mixed combinations
+    
     Args:
         sql: SQL string to parse
         enable_unqualified_resolution: Whether to infer table names for unqualified columns
@@ -737,63 +741,155 @@ def fallback_extract_columns(sql: str, enable_unqualified_resolution: bool = Tru
     Returns:
         List of table.column references found via regex
     """
-    if not SQLPARSE_AVAILABLE:
-        return []
-    
     columns = []
     
     try:
-        # Tokenize SQL using sqlparse (tolerant, doesn't require valid SQL)
-        parsed = sqlparse.parse(sql)
+        # Work with original case - do NOT uppercase as it breaks bracketed/quoted names
+        sql_text = sql
         
-        if not parsed:
-            return []
+        # Strip NOLOCK and other hints first so they don't disrupt token scanning
+        sql_text = re.sub(r'(?i)\s+WITH\s*\(\s*(NOLOCK|READPAST|READUNCOMMITTED|READCOMMITTED|REPEATABLEREAD|SERIALIZABLE|UPDLOCK|XLOCK|ROWLOCK|PAGLOCK|TABLOCK|TABLOCKX|FASTFIRSTROW|FORCESEEK|FORCESCAN|NOWAIT|READCOMMITTEDLOCK|READPASTLOCK)\s*\)', '', sql_text)
+        sql_text = re.sub(r'(?i)\(\s*NOLOCK\s*\)', '', sql_text)
+        sql_text = re.sub(r'(?i)\s+\(NOLOCK\)', '', sql_text)
         
-        sql_text = sql.upper()
+        # Robust pattern for identifier (bracket/quote/backtick/unquoted)
+        # Each identifier type captured in named groups
+        ident_pattern = r'''
+            \[(?P<{prefix}_b>[^\]]+)\]              |  # [bracketed]
+            "(?P<{prefix}_q>[^"]+)"                 |  # "double-quoted"
+            `(?P<{prefix}_bt>[^`]+)`                |  # `backtick`
+            (?P<{prefix}_u>[A-Za-z_][A-Za-z0-9_$#]*)   # unquoted
+        '''
         
-        # Extract table aliases using regex patterns
-        # Pattern: FROM table [AS] alias or JOIN table [AS] alias
-        alias_patterns = [
-            r'(?:FROM|JOIN)\s+(\w+)(?:\s+(?:AS\s+)?(\w+))?',
-            r'(\w+)\s+(?:AS\s+)?(\w+)\s+(?:JOIN|,|WHERE)',
-        ]
+        # Build the full table.column pattern (with optional schema prefix)
+        # Matches: table.column, schema.table.column, [table].[column], "table"."column", etc.
+        column_pattern = re.compile(r'''
+            (?:
+                ''' + ident_pattern.format(prefix='table') + r'''
+            )
+            \s*\.\s*
+            (?:
+                ''' + ident_pattern.format(prefix='col') + r'''
+            )
+        ''', re.VERBOSE | re.IGNORECASE)
         
-        alias_map = {}
-        for pattern in alias_patterns:
-            for match in re.finditer(pattern, sql_text, re.IGNORECASE):
-                table = match.group(1)
-                alias = match.group(2) if match.lastindex >= 2 and match.group(2) else None
-                if alias and alias.upper() not in ['AS', 'ON', 'WHERE', 'AND', 'OR']:
-                    alias_map[alias.upper()] = table.upper()
-                # Also map table to itself
-                alias_map[table.upper()] = table.upper()
+        # Also match 3-part names: schema.table.column
+        three_part_pattern = re.compile(r'''
+            (?:
+                ''' + ident_pattern.format(prefix='schema') + r'''
+            )
+            \s*\.\s*
+            (?:
+                ''' + ident_pattern.format(prefix='table') + r'''
+            )
+            \s*\.\s*
+            (?:
+                ''' + ident_pattern.format(prefix='col') + r'''
+            )
+        ''', re.VERBOSE | re.IGNORECASE)
         
-        # Extract table.column patterns using regex
-        # Pattern: table.column or alias.column
-        column_pattern = r'\b(\w+)\.(\w+)\b'
+        def extract_named_group(match, prefixes):
+            """Extract the value from whichever named group matched."""
+            for prefix in prefixes:
+                for suffix in ['_b', '_q', '_bt', '_u']:
+                    key = prefix + suffix
+                    try:
+                        val = match.group(key)
+                        if val is not None:
+                            return val
+                    except IndexError:
+                        continue
+            return None
         
-        for match in re.finditer(column_pattern, sql_text):
-            table_ref = match.group(1).upper()
-            col_name = match.group(2).upper()
+        # Extract 3-part names first (schema.table.column)
+        seen = set()
+        for match in three_part_pattern.finditer(sql_text):
+            schema = extract_named_group(match, ['schema'])
+            table = extract_named_group(match, ['table'])
+            col = extract_named_group(match, ['col'])
             
-            # Skip if it's a function call (e.g., COUNT(*), MAX(col))
-            if col_name == '*':
+            if table and col and col != '*':
+                if schema:
+                    qualified_name = f"{schema}.{table}.{col}"
+                else:
+                    qualified_name = f"{table}.{col}"
+                columns.append(qualified_name)
+                # Track position to avoid double-matching
+                seen.add((match.start(), match.end()))
+        
+        # Extract 2-part names (table.column) that weren't part of 3-part matches
+        for match in column_pattern.finditer(sql_text):
+            # Skip if this overlaps with a 3-part match
+            overlaps = False
+            for start, end in seen:
+                if start <= match.start() < end or start < match.end() <= end:
+                    overlaps = True
+                    break
+            if overlaps:
                 continue
             
-            # Resolve alias to table name
-            actual_table = alias_map.get(table_ref, table_ref)
+            table = extract_named_group(match, ['table'])
+            col = extract_named_group(match, ['col'])
             
-            # Build qualified name
-            qualified_name = f"{actual_table}.{col_name}"
-            columns.append(qualified_name)
+            if table and col and col != '*':
+                qualified_name = f"{table}.{col}"
+                columns.append(qualified_name)
         
-        # If unqualified resolution is enabled, try to infer table names
-        if enable_unqualified_resolution and columns:
-            # Find unqualified columns that appear after FROM/JOIN
-            # This is a simple heuristic - find column names that aren't table.column
-            unqualified_pattern = r'\b(?<!\.)(\w+)(?!\.)\b'
-            # This is simplified - in practice, you'd want more context
-            pass
+        # Build alias map for resolving aliases (bracket/quote-aware)
+        alias_map = {}
+        
+        # Pattern for: FROM/JOIN [table] [AS] alias or FROM/JOIN table alias
+        table_alias_pattern = re.compile(r'''
+            (?:FROM|JOIN)\s+
+            (?:
+                \[(?P<table_b>[^\]]+)\]   |
+                "(?P<table_q>[^"]+)"       |
+                `(?P<table_bt>[^`]+)`      |
+                (?P<table_u>[A-Za-z_][A-Za-z0-9_$#.]*)
+            )
+            (?:\s+(?:AS\s+)?
+                (?:
+                    \[(?P<alias_b>[^\]]+)\]   |
+                    "(?P<alias_q>[^"]+)"       |
+                    `(?P<alias_bt>[^`]+)`      |
+                    (?P<alias_u>[A-Za-z_][A-Za-z0-9_$#]*)
+                )
+            )?
+        ''', re.VERBOSE | re.IGNORECASE)
+        
+        for match in table_alias_pattern.finditer(sql_text):
+            table = extract_named_group(match, ['table'])
+            alias = extract_named_group(match, ['alias'])
+            
+            if table:
+                # Skip SQL keywords that might be captured as aliases
+                keywords = {'AS', 'ON', 'WHERE', 'AND', 'OR', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'CROSS', 'FULL'}
+                if alias and alias.upper() not in keywords:
+                    alias_map[alias] = table
+                    alias_map[alias.lower()] = table
+                    alias_map[alias.upper()] = table
+                alias_map[table] = table
+                alias_map[table.lower()] = table
+                alias_map[table.upper()] = table
+        
+        # Resolve aliases in the extracted columns
+        resolved_columns = []
+        for col_ref in columns:
+            parts = col_ref.split('.')
+            if len(parts) >= 2:
+                table_part = parts[-2]
+                col_part = parts[-1]
+                # Try to resolve alias
+                resolved_table = alias_map.get(table_part) or alias_map.get(table_part.lower()) or alias_map.get(table_part.upper()) or table_part
+                if len(parts) == 3:
+                    schema_part = parts[0]
+                    resolved_columns.append(f"{schema_part}.{resolved_table}.{col_part}")
+                else:
+                    resolved_columns.append(f"{resolved_table}.{col_part}")
+            else:
+                resolved_columns.append(col_ref)
+        
+        return resolved_columns
         
     except Exception:
         # If fallback also fails, return empty list

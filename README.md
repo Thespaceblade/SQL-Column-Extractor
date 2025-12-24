@@ -36,7 +36,9 @@ Extract table.column references from SQL files and output to CSV/Excel format. P
   - Removes ANSI escape codes and Unicode control characters
 - Hybrid parsing strategy:
   - Primary: Strict AST parsing using sqlglot for accurate column extraction
-  - Fallback: Tolerant parsing using sqlparse + regex when AST parsing fails
+  - Fallback: Pure regex-based extraction (no sqlparse dependency) when AST parsing fails
+  - Fallback is bracket/quote/backtick-aware: handles `[schema].[table]`, `"table"."column"`, `` `table`.`column` ``
+  - Case-preserving: maintains original identifier case for accurate extraction
   - Automatic fallback ensures maximum column extraction even from malformed SQL
 - RDL-aware filename filtering: Automatically skips files matching RDL patterns (SOR_DATA, SOR_REFRESH, etc.)
 - Default dialect: Uses `tsql` (SQL Server) as default if no dialect specified
@@ -53,7 +55,7 @@ Or install from requirements.txt:
 pip install -r requirements.txt
 ```
 
-**Note**: `sqlparse` is optional but recommended for fallback parsing when sqlglot fails. The script will work without it but with reduced robustness.
+**Note**: `sqlparse` is optional. The fallback parser now uses pure regex patterns that are bracket/quote/backtick-aware and does not require sqlparse.
 
 ## Usage
 
@@ -310,13 +312,25 @@ When a SQL file fails to parse, the error message includes:
 - Dynamic SQL (EXEC with string literals) cannot be statically analyzed
 - Fallback parsing (PARTIAL_OK) may extract columns with less accuracy than AST parsing, but provides better coverage for malformed SQL
 
+## Supported Identifier Formats
+
+The extractor handles all common SQL identifier quoting styles:
+
+| Style | Example | Dialect |
+|-------|---------|---------|
+| Brackets | `[schema].[table].[column]` | SQL Server (TSQL) |
+| Double quotes | `"schema"."table"."column"` | ANSI SQL, PostgreSQL, Oracle |
+| Backticks | `` `schema`.`table`.`column` `` | MySQL |
+| Unquoted | `schema.table.column` | All dialects |
+| Mixed | `[schema]."table".column` | Cross-dialect |
+
 ## Requirements
 
 - Python 3.7+
 - sqlglot >= 24.0.0 (required)
 - pandas >= 2.0.0 (for Excel output)
 - openpyxl >= 3.0.0 (for Excel output)
-- sqlparse >= 0.4.0 (optional, recommended for fallback parsing)
+- sqlparse >= 0.4.0 (optional, no longer required for fallback)
 
 ## License
 
