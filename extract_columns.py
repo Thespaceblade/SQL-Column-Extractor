@@ -352,8 +352,47 @@ def preprocess_sql(sql: str) -> str:
     
     # Remove comments BEFORE extracting SELECT statements
     # This prevents commented SELECT statements from being extracted
-    sql = re.sub(r'--.*?$', '', sql, flags=re.MULTILINE)
-    sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
+    # IMPORTANT: We must NOT remove comments that appear inside string literals
+    
+    # Strategy: Protect string literals first, then remove comments, then restore strings
+    # This handles cases like: SELECT 'text -- not a comment' FROM table
+    
+    # Step 1: Find and replace string literals with placeholders
+    # This prevents comment removal from affecting string contents
+    string_placeholders = []
+    string_counter = 0
+    
+    def replace_string(match):
+        nonlocal string_counter
+        placeholder = f"__STRING_LITERAL_{string_counter}__"
+        string_placeholders.append(match.group(0))
+        string_counter += 1
+        return placeholder
+    
+    # Match single-quoted strings (handles escaped quotes: '' or \')
+    # Pattern: '...' where ... can contain '' (escaped single quote) or any char except unescaped '
+    sql = re.sub(r"'([^']|'')*'", replace_string, sql)
+    
+    # Match double-quoted strings (handles escaped quotes: "" or \")
+    # Pattern: "..." where ... can contain "" (escaped double quote) or any char except unescaped "
+    sql = re.sub(r'"([^"]|"")*"', replace_string, sql)
+    
+    # Match bracket identifiers [name] (these might contain comment-like patterns)
+    # Pattern: [...] where ... can contain ]] (escaped bracket) or any char except unescaped ]
+    sql = re.sub(r'\[([^\]]|\]\])*\]', replace_string, sql)
+    
+    # Step 2: Now remove comments (safe because strings are protected)
+    # Remove single-line comments (-- until end of line, but not if -- is part of a larger token)
+    # Use word boundary to ensure -- is at start of comment, not part of another token
+    sql = re.sub(r'--[^\r\n]*', '', sql)
+    
+    # Remove multi-line comments (/* ... */)
+    # Handle nested comments by matching from /* to the first */
+    sql = re.sub(r'/\*[^*]*\*+(?:[^/*][^*]*\*+)*/', '', sql)
+    
+    # Step 3: Restore string literals in reverse order to avoid conflicts
+    for i in range(len(string_placeholders) - 1, -1, -1):
+        sql = sql.replace(f"__STRING_LITERAL_{i}__", string_placeholders[i])
     
     # Extract SELECT statements from IF/BEGIN/END blocks AFTER comment removal
     # This ensures we don't lose SELECT statements inside procedural code that sqlglot can't parse
