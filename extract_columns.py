@@ -234,6 +234,88 @@ def decode_html_entities(sql: str) -> str:
     return sql
 
 
+def extract_select_statements_from_blocks(sql: str) -> str:
+    """
+    Extract SELECT statements from inside IF/BEGIN/END blocks and other procedural code.
+    This handles cases where SELECT statements are nested in procedural SQL that sqlglot can't parse.
+    
+    Args:
+        sql: SQL string that may contain IF/BEGIN/END blocks
+        
+    Returns:
+        SQL string with SELECT statements extracted from procedural blocks, or original if no extraction needed
+    """
+    if not sql or not isinstance(sql, str):
+        return sql
+    
+    # Check if SQL contains IF/BEGIN/END blocks that might need extraction
+    has_if_begin = re.search(r'(?i)\bIF\s+.*?\bBEGIN\b', sql, re.DOTALL)
+    has_begin_end = re.search(r'(?i)\bBEGIN\s+.*?\bEND\b', sql, re.DOTALL)
+    
+    # If no procedural blocks, return as-is (might be standalone SELECT)
+    if not has_if_begin and not has_begin_end:
+        return sql
+    
+    # Strategy: Find the main SELECT statement (the one with JOINs, complex WHERE, etc.)
+    # Nested SELECTs in SET/DECLARE will be simpler and shorter
+    
+    # Find all SELECT statements with their positions
+    all_selects = []
+    for match in re.finditer(r'(?i)\bSELECT\s+', sql):
+        start = match.start()
+        # Find the end of this SELECT statement (up to END, next SELECT, or end of string)
+        # Look for FROM, then continue until we hit END, next major keyword, or end
+        remaining = sql[start:]
+        
+        # Find FROM clause
+        from_match = re.search(r'(?i)\bFROM\s+', remaining)
+        if not from_match:
+            continue
+        
+        # Find the end - look for END, next SELECT, or end of string
+        # But also look for ORDER BY, GROUP BY, etc. as valid endings
+        end_pattern = r'(?i)(?=\b(?:END|SELECT|IF|BEGIN)\b|$)'
+        end_match = re.search(end_pattern, remaining[from_match.end():])
+        
+        if end_match:
+            select_end = start + from_match.end() + end_match.start()
+        else:
+            # No clear end, take up to END or end of string
+            end_match = re.search(r'(?i)\bEND\b', remaining)
+            select_end = start + (end_match.start() if end_match else len(remaining))
+        
+        select_stmt = sql[start:select_end].strip()
+        
+        # Check if this SELECT is part of SET x = (SELECT ...) or DECLARE
+        # Look backwards from start position
+        before = sql[max(0, start-100):start]
+        is_in_set_declare = bool(re.search(r'(?i)(?:SET|DECLARE)\s+[^=]*=\s*\(?\s*$', before))
+        
+        if not is_in_set_declare and 'FROM' in select_stmt.upper():
+            # This is a main SELECT statement
+            # Clean it up - remove trailing incomplete parts
+            # Make sure it ends properly (has ORDER BY, WHERE, or just FROM...JOIN)
+            all_selects.append((len(select_stmt), select_stmt, start))
+    
+    if all_selects:
+        # Sort by length (descending) - the main SELECT is usually the longest
+        all_selects.sort(reverse=True, key=lambda x: x[0])
+        
+        # Take the longest SELECT statement (most likely the main one)
+        main_select = all_selects[0][1]
+        
+        # Clean it up
+        main_select = re.sub(r'\s+', ' ', main_select.strip())
+        
+        # Remove any trailing incomplete parts (like closing parens from SET statements)
+        main_select = re.sub(r'\)\s*$', '', main_select).strip()
+        
+        return main_select
+    
+    # If no main SELECTs found, return original (might be parseable as-is)
+    return sql
+
+
 def preprocess_sql(sql: str) -> str:
     """
     Preprocess SQL to handle edge cases and remove problematic syntax.
@@ -256,6 +338,10 @@ def preprocess_sql(sql: str) -> str:
     # Handle None or invalid input
     if sql is None or not isinstance(sql, str):
         return ""
+    
+    # Extract SELECT statements from IF/BEGIN/END blocks BEFORE other preprocessing
+    # This ensures we don't lose SELECT statements inside procedural code that sqlglot can't parse
+    sql = extract_select_statements_from_blocks(sql)
     
     sql = decode_html_entities(sql)
     
