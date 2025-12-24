@@ -5,9 +5,12 @@ Extract table.column references from SQL files and output to CSV/Excel format. P
 ## Features
 
 - Extracts fully qualified table.column references from SQL queries
-- Resolves table aliases to actual table names
-- Handles unqualified columns by inferring table names from context
+- Resolves table aliases to actual table names (strips brackets for clean output)
+- Handles unqualified columns by inferring table names from context with fallback
 - Processes folders recursively (searches all subdirectories)
+- Filters out datasets matching exclusion patterns (SOR%, Tablix, EndDate, EvidenceTab, EvidenceTablix)
+- Output sorted by ReportName, Dataset, ColumnName
+- Excel output with auto-formatted column widths and filters
 - Supports complex SQL features:
   - CTEs (Common Table Expressions)
   - Subqueries and derived tables
@@ -15,6 +18,7 @@ Extract table.column references from SQL files and output to CSV/Excel format. P
   - Window functions
   - WHERE, HAVING, and JOIN conditions
 - Case-insensitive alias resolution
+- Preserves SQL Server bracketed identifiers during parsing
 - Preprocesses SQL to handle edge cases:
   - Removes SQL comments
   - Removes DDL statements (CREATE, ALTER, DROP)
@@ -25,6 +29,7 @@ Extract table.column references from SQL files and output to CSV/Excel format. P
   - Removes TOP clauses
   - Normalizes whitespace
   - Handles HTML entities and escape codes
+  - Preserves bracketed identifiers (e.g., [schema].[table])
 
 ## Installation
 
@@ -85,7 +90,11 @@ The script generates a CSV or Excel file with three columns:
 
 - **ReportName**: The report name extracted from the SQL filename (part before `__`)
 - **Dataset**: The dataset name extracted from the SQL filename (part after `__`, or "Default" if no `__` found)
-- **ColumnName**: Fully qualified table.column reference (e.g., `employees.employee_id`)
+- **ColumnName**: Fully qualified table.column reference (e.g., `dbo.employees.employee_id`)
+
+The output is automatically sorted by ReportName, Dataset, and ColumnName. Excel files include:
+- Auto-formatted column widths (capped at 50 characters)
+- Auto-filter enabled on the header row for easy filtering
 
 ### Filename Parsing
 
@@ -96,16 +105,27 @@ The script parses SQL filenames to extract Report Name and Dataset:
   - Dataset: `AppNames`
 - If no double underscore (`__`) is found, Dataset defaults to `"Default"`
 
+### Dataset Filtering
+
+Files with datasets matching the following patterns are automatically skipped:
+- SOR% (e.g., SOR_DATA, SOR_REFRESH, SORDATA)
+- Tablix
+- EndDate
+- EvidenceTab
+- EvidenceTablix
+
+Filtering is case-insensitive and occurs before SQL processing.
+
 ### Example Output
 
 | ReportName | Dataset | ColumnName |
 |------------|---------|------------|
-| 115_Hr_Inactive_Users_with_Active_accounts | AppNames | users.user_id |
-| 115_Hr_Inactive_Users_with_Active_accounts | AppNames | users.email |
-| 200_Customer_Orders | Default | orders.order_id |
-| 200_Customer_Orders | Default | orders.user_id |
+| 115_Hr_Inactive_Users_with_Active_accounts | AppNames | dbo.users.user_id |
+| 115_Hr_Inactive_Users_with_Active_accounts | AppNames | dbo.users.email |
+| 200_Customer_Orders | Default | dbo.orders.order_id |
+| 200_Customer_Orders | Default | dbo.orders.user_id |
 
-Each row represents one unique column reference per file. Duplicate columns within the same file are removed, but the same column can appear in multiple rows if it exists in different files.
+Each row represents one unique column reference per file. Duplicate columns within the same file are removed, but the same column can appear in multiple rows if it exists in different files. Column names are output in clean format without brackets (e.g., `dbo.users.id` instead of `[dbo].[users].[id]`).
 
 ### Detailed Example
 
@@ -116,13 +136,13 @@ FROM employees
 WHERE status = 'active';
 ```
 
-**Output CSV**:
+**Output CSV** (sorted by ReportName, Dataset, ColumnName):
 ```csv
 ReportName,Dataset,ColumnName
-115_Hr_Inactive_Users_with_Active_accounts,AppNames,employees.employee_id
-115_Hr_Inactive_Users_with_Active_accounts,AppNames,employees.first_name
-115_Hr_Inactive_Users_with_Active_accounts,AppNames,employees.email
-115_Hr_Inactive_Users_with_Active_accounts,AppNames,employees.status
+115_Hr_Inactive_Users_with_Active_accounts,AppNames,dbo.employees.employee_id
+115_Hr_Inactive_Users_with_Active_accounts,AppNames,dbo.employees.email
+115_Hr_Inactive_Users_with_Active_accounts,AppNames,dbo.employees.first_name
+115_Hr_Inactive_Users_with_Active_accounts,AppNames,dbo.employees.status
 ```
 
 **Input SQL File** (no double underscore): `simple_query.sql`
@@ -130,23 +150,26 @@ ReportName,Dataset,ColumnName
 SELECT id, name FROM users;
 ```
 
-**Output CSV**:
+**Output CSV** (sorted by ReportName, Dataset, ColumnName):
 ```csv
 ReportName,Dataset,ColumnName
-simple_query,Default,users.id
-simple_query,Default,users.name
+simple_query,Default,dbo.users.id
+simple_query,Default,dbo.users.name
 ```
 
 ## How It Works
 
-1. **Preprocessing**: Removes comments, DDL statements, and other non-query SQL
-2. **Parsing**: Uses sqlglot to parse SQL into an Abstract Syntax Tree (AST)
-3. **Alias Resolution**: Builds a map of table aliases to actual table names
-4. **Column Extraction**: Traverses the AST to find all column references
-5. **Qualification**: Resolves unqualified columns to their source tables
-6. **Filename Parsing**: Extracts Report Name and Dataset from SQL filename
-7. **Deduplication**: Removes duplicate columns within each file (keeps unique per file)
-8. **Output**: Writes results to CSV or Excel format with ReportName, Dataset, ColumnName columns
+1. **Filename Parsing**: Extracts Report Name and Dataset from SQL filename
+2. **Dataset Filtering**: Skips files with excluded dataset names (SOR%, Tablix, EndDate, EvidenceTab, EvidenceTablix)
+3. **Preprocessing**: Removes comments, DDL statements, and other non-query SQL while preserving bracketed identifiers
+4. **Parsing**: Uses sqlglot to parse SQL into an Abstract Syntax Tree (AST), with regex fallback for unparseable SQL
+5. **Alias Resolution**: Builds a map of table aliases to actual table names (strips brackets for clean output)
+6. **Column Extraction**: Traverses the AST to find all column references
+7. **Qualification**: Resolves unqualified columns to their source tables with fallback to first table in FROM clause
+8. **Bracket Stripping**: Removes SQL Server brackets from identifiers for clean output (e.g., [dbo].[users] -> dbo.users)
+9. **Deduplication**: Removes duplicate columns within each file (keeps unique per file)
+10. **Sorting**: Sorts output by ReportName, Dataset, ColumnName
+11. **Output**: Writes results to CSV or Excel format with auto-formatting and filters (Excel only)
 
 ## Supported SQL Features
 
@@ -161,9 +184,11 @@ simple_query,Default,users.name
 
 ## Limitations
 
-- Unqualified columns in multi-table queries may not be resolved if the table cannot be determined from context
+- Unqualified columns in multi-table queries use fallback to first table in FROM clause if table cannot be determined from context
+- Columns with unresolvable table references (e.g., nonexistent_table.column) are skipped
 - Some SQL dialects may require explicit `--dialect` specification
 - Very large SQL files may take longer to process
+- CSV format does not support filters or auto-formatting (Excel only)
 
 ## Requirements
 
