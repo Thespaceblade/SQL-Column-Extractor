@@ -1287,15 +1287,37 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                                 # skip it (This handles cases like nonexistent_table.column)
                                 # Note: We allow it if it's in alias_map as a key (table name) or value (resolved name)
                                 if not resolved_table_check:
-                                    # Check if it's a direct table name (might be in alias_map as a key mapping to itself)
-                                    # or if it appears as part of a resolved name
-                                    is_known_table = (table_name_str in alias_map or 
-                                                     table_name_str.lower() in case_insensitive_alias_map or
-                                                     table_name_str in scope_alias_map or
-                                                     table_name_str.lower() in scope_ci_map or
-                                                     any(table_name_str.lower() in str(v).lower() for v in alias_map.values()))
+                                    # Check if it's a direct table name vs unresolved alias
+                                    # We need to distinguish between:
+                                    #   - A table name that appears as a VALUE in alias_map (valid, was resolved)
+                                    #   - A table name that appears as a KEY mapping to itself (direct table)
+                                    #   - An alias that appears as KEY but couldn't be resolved (should skip)
+                                    
+                                    # Check if it's a resolved table name (appears as value in alias_map)
+                                    is_resolved_value = any(
+                                        table_name_str.lower() == str(v).lower() or 
+                                        table_name_str.lower() == str(v).lower().split('.')[-1]
+                                        for v in alias_map.values()
+                                    )
+                                    
+                                    # Check if it's a direct table name (appears as key mapping to itself)
+                                    is_direct_table = (
+                                        (table_name_str in alias_map and alias_map[table_name_str] == table_name_str) or
+                                        (table_name_str.lower() in case_insensitive_alias_map and 
+                                         case_insensitive_alias_map[table_name_str.lower()].lower() == table_name_str.lower())
+                                    )
+                                    
+                                    # Check if it's embedded in a resolved value (part of schema.table)
+                                    is_embedded_table = any(
+                                        table_name_str.lower() in str(v).lower().split('.')
+                                        for v in alias_map.values()
+                                    )
+                                    
+                                    # Only allow if it's a valid table name, not an unresolved alias
+                                    is_known_table = is_resolved_value or is_direct_table or is_embedded_table
+                                    
                                     if not is_known_table:
-                                        # Table reference doesn't exist and isn't a known table - skip it
+                                        # Table reference is an unresolved alias - skip it
                                         continue
                             
                             # Build fully qualified name
@@ -1378,6 +1400,24 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                                                  scope_alias_map.get(table_name_str) or
                                                  case_insensitive_alias_map.get(table_name_str.lower()) or 
                                                  alias_map.get(table_name_str))
+                                
+                                # If still not found, try stripping brackets and looking up again
+                                if not resolved_table:
+                                    table_name_stripped = strip_brackets(table_name_str)
+                                    if table_name_stripped != table_name_str:
+                                        resolved_table = (scope_ci_map.get(table_name_stripped.lower()) or
+                                                         scope_alias_map.get(table_name_stripped) or
+                                                         case_insensitive_alias_map.get(table_name_stripped.lower()) or
+                                                         alias_map.get(table_name_stripped))
+                                
+                                # If still not found, try case variations
+                                if not resolved_table:
+                                    table_name_stripped = strip_brackets(table_name_str)
+                                    # Try uppercase
+                                    resolved_table = alias_map.get(table_name_stripped.upper())
+                                    # Try title case
+                                    if not resolved_table:
+                                        resolved_table = alias_map.get(table_name_stripped.title())
                             
                             if resolved_table:
                                 # Replace alias with actual table name
@@ -1419,13 +1459,54 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                                     # No parts yet, include all parts from resolved table
                                     parts.extend(table_parts)
                             else:
-                                # Table name not in alias map - use as-is
-                                # BUT: if db already resolved to a table name, don't add table_name_str
-                                # (it's already included in the resolved db)
-                                if not db_resolved_to_table:
-                                    # If column was already qualified, include it (this handles cases like
-                                    # SELECT users.id FROM dbo.users where "users" isn't in alias_map)
-                                    parts.append(table_name_str)
+                                # Table name not in alias map - determine if it's a valid table name or unresolved alias
+                                # CRITICAL: We must NEVER output an alias that couldn't be resolved
+                                
+                                if db_resolved_to_table:
+                                    # db already contains the table name, skip table_name_str
+                                    pass
+                                else:
+                                    # Strategy 1: Check if table_name_str appears as a RESOLVED VALUE in alias_map
+                                    # This indicates it's a valid table name that was resolved from another alias
+                                    is_resolved_table_name = any(
+                                        table_name_str.lower() == str(v).lower() or 
+                                        table_name_str.lower() == str(v).lower().split('.')[-1]
+                                        for v in alias_map.values()
+                                    )
+                                    
+                                    # Strategy 2: Check if table_name_str is already in parts (qualified name)
+                                    is_table_part_of_qualified = any(
+                                        part.lower() == table_name_str.lower() 
+                                        for part in parts
+                                    ) if parts else False
+                                    
+                                    # Strategy 3: Check if it looks like a full table name (not short alias)
+                                    # Short aliases are typically 1-3 chars; table names are longer or contain dots
+                                    looks_like_table_name = (
+                                        '.' in table_name_str or  # Already qualified
+                                        len(table_name_str) > 3 or  # Longer names less likely to be aliases
+                                        table_name_str[0].isupper()  # PascalCase table names
+                                    ) if table_name_str else False
+                                    
+                                    # Strategy 4: Check if it's a known CTE name (CTEs map to themselves)
+                                    is_cte_name = (
+                                        table_name_str in alias_map and 
+                                        alias_map[table_name_str] == table_name_str and
+                                        table_name_str in global_cte_names
+                                    ) if table_name_str else False
+                                    
+                                    # Only include if it's a valid table name, CTE, or clearly not an alias
+                                    if is_resolved_table_name or is_table_part_of_qualified:
+                                        parts.append(table_name_str)
+                                    elif is_cte_name:
+                                        # CTE reference - include as-is (CTEs are valid "tables")
+                                        parts.append(table_name_str)
+                                    elif looks_like_table_name and not (len(table_name_str) <= 3 and table_name_str.isalpha()):
+                                        # Looks like a real table name, not a short alias
+                                        parts.append(table_name_str)
+                                    else:
+                                        # This is likely an unresolved alias - SKIP this column
+                                        continue
                             
                             # Add column name
                             col_name = col.name if isinstance(col.name, str) else str(col.name)
