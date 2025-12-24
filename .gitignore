@@ -36,3 +36,8 @@ Thumbs.db
 # Logs
 *.log
 
+# Backup files
+*.backup
+*_backup.py
+extract_columns.py.backup
+

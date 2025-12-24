@@ -26,7 +26,6 @@ from typing import Optional
 from collections import defaultdict
 from datetime import datetime
 
-# Import sqlglot (install with: pip install sqlglot or pip install "sqlglot[rs]")
 try:
     import sqlglot
     from sqlglot import expressions as exp
@@ -37,7 +36,6 @@ except ImportError:
     print("Or for better performance: pip install 'sqlglot[rs]'")
     sys.exit(1)
 
-# Import sqlparse for fallback tolerant parsing (install with: pip install sqlparse)
 try:
     import sqlparse
     SQLPARSE_AVAILABLE = True
@@ -78,7 +76,6 @@ def is_rdl_skip_file(filepath: Path) -> bool:
     """
     filename = filepath.name.upper()
     
-    # Patterns to skip (case-insensitive matching)
     skip_patterns = [
         r'SOR[_\s]*DATA',
         r'SOR[_\s]*DATA[_\s]*REFRESH',
@@ -107,20 +104,16 @@ def parse_filename(filepath: Path) -> tuple[str, str]:
     Returns:
         tuple: (report_name, dataset)
     """
-    # Get just the filename (no path)
     filename = filepath.name
     
-    # Remove .sql extension
     if filename.lower().endswith('.sql'):
         filename = filename[:-4]
     
-    # Split by double underscore
     if '__' in filename:
-        parts = filename.split('__', 1)  # Split on first occurrence only
+        parts = filename.split('__', 1)
         report_name = parts[0]
         dataset = parts[1] if len(parts) > 1 else "Default"
     else:
-        # No double underscore - entire filename is report name
         report_name = filename
         dataset = "Default"
     
@@ -143,40 +136,58 @@ def decode_html_entities(sql: str) -> str:
     Returns:
         SQL string with HTML/URL encoded characters decoded
     """
-    # First decode HTML entities using standard library
     sql = html.unescape(sql)
     
-    # Decode URL-encoded characters (like %3E, %3C, %26, etc.)
-    # Common SQL-related URL encodings:
-    # %3E = >, %3C = <, %3D = =, %26 = &, %27 = ', %22 = ", %20 = space
-    try:
-        sql = urllib.parse.unquote(sql)
-    except Exception:
-        # If URL decoding fails, continue with what we have
-        pass
+    # Handle double-encoded URL entities (decode multiple times if needed)
+    max_decode_iterations = 3
+    for _ in range(max_decode_iterations):
+        try:
+            decoded = urllib.parse.unquote(sql)
+            if decoded == sql:
+                break
+            sql = decoded
+        except Exception:
+            break
     
-    # Handle any remaining numeric/hex HTML entities that html.unescape might have missed
-    # This is a fallback for edge cases
+    # Handle plus signs as spaces in URL encoding context
+    sql = sql.replace('+', ' ')
+    
     html_entity_map = {
         '&gt;': '>',
         '&lt;': '<',
         '&amp;': '&',
         '&quot;': '"',
         '&apos;': "'",
+        '&nbsp;': ' ',
+        '&copy;': '(c)',
+        '&reg;': '(R)',
+        '&trade;': '(TM)',
         '&#39;': "'",
         '&#x27;': "'",
         '&#x22;': '"',
         '&#x26;': '&',
         '&#x3C;': '<',
         '&#x3E;': '>',
+        '&#x60;': '`',
+        '&#x7B;': '{',
+        '&#x7D;': '}',
+        '&#x7C;': '|',
         '&#60;': '<',
         '&#62;': '>',
         '&#38;': '&',
         '&#34;': '"',
+        '&#96;': '`',
+        '&#123;': '{',
+        '&#125;': '}',
+        '&#124;': '|',
     }
     
     for entity, char in html_entity_map.items():
         sql = sql.replace(entity, char)
+    
+    # Handle any remaining numeric/hex HTML entities (catch-all pattern)
+    sql = re.sub(r'&#x([0-9a-fA-F]+);', lambda m: chr(int(m.group(1), 16)) if int(m.group(1), 16) < 0x110000 else m.group(0), sql)
+    sql = re.sub(r'&#(\d+);', lambda m: chr(int(m.group(1))) if int(m.group(1)) < 0x110000 else m.group(0), sql)
     
     return sql
 
@@ -200,153 +211,100 @@ def preprocess_sql(sql: str) -> str:
     - Non-printable characters
     - Normalize whitespace
     """
-    # Decode HTML entities first (before removing other things)
     sql = decode_html_entities(sql)
     
-    # Remove SQL comments (-- style) - must come before other processing
+    # Handle BOM variants (UTF-8, UTF-16 BE/LE)
+    if sql.startswith('\ufeff'):
+        sql = sql[1:]
+    if sql.startswith('\xFE\xFF') or sql.startswith('\xFF\xFE'):
+        sql = sql[2:]
+    
+    # Normalize line endings to LF (handle CRLF, CR, LF)
+    sql = sql.replace('\r\n', '\n').replace('\r', '\n')
+    
     sql = re.sub(r'--.*?$', '', sql, flags=re.MULTILINE)
-    
-    # Remove SQL comments (/* */ style)
     sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
-    
-    # Remove USE statements first (before GO, since GO might follow USE)
-    # Match USE at start of line or after semicolon/newline, followed by database name
     sql = re.sub(r'(?i)(?:^|[\n;])\s*USE\s+[^\s;]+(?:\s*;)?\s*(?=[\n;]|$|\s)', '', sql, flags=re.MULTILINE)
-    
-    # Remove GO statements (SQL Server batch separator) - can be standalone or with semicolon
-    # Match GO at start of line or after semicolon/newline/space, optionally followed by semicolon
+    sql = re.sub(r'(?i)(?:^|[\n;]|\s)\s*GO\s+\d+\s*(?=[\n;]|$|\s)', '', sql, flags=re.MULTILINE)
     sql = re.sub(r'(?i)(?:^|[\n;]|\s)\s*GO\s*;?\s*(?=[\n;]|$|\s)', '', sql, flags=re.MULTILINE)
-    
-    # Remove SET NOCOUNT ON/OFF
     sql = re.sub(r'(?i)SET\s+NOCOUNT\s+(ON|OFF)\s*;?', '', sql, flags=re.MULTILINE)
-    
-    # Remove SET TRANSACTION ISOLATION LEVEL
     sql = re.sub(r'(?i)SET\s+TRANSACTION\s+ISOLATION\s+LEVEL\s+[^;]+;?', '', sql, flags=re.MULTILINE)
     
-    # Remove other SET statements (but preserve UPDATE SET)
-    # Split by semicolons, process each statement
+    # Remove transaction control statements
+    sql = re.sub(r'(?i)\bBEGIN\s+TRANSACTION\s*;?', '', sql)
+    sql = re.sub(r'(?i)\bCOMMIT\s+(TRANSACTION)?\s*;?', '', sql)
+    sql = re.sub(r'(?i)\bROLLBACK\s+(TRANSACTION)?\s*;?', '', sql)
+    sql = re.sub(r'(?i)\bSAVE\s+TRANSACTION\s+\w+\s*;?', '', sql)
+    
+    # Remove TRY/CATCH blocks
+    sql = re.sub(r'(?i)\bBEGIN\s+TRY\s*;?', '', sql)
+    sql = re.sub(r'(?i)\bBEGIN\s+CATCH\s*;?', '', sql)
+    sql = re.sub(r'(?i)\bEND\s+(TRY|CATCH)\s*;?', '', sql)
+    
     statements = sql.split(';')
     cleaned_statements = []
     for stmt in statements:
         stmt = stmt.strip()
         if not stmt:
             continue
-        # Skip SET statements that aren't part of UPDATE
         if re.match(r'(?i)^\s*SET\s+', stmt) and not re.search(r'(?i)\bUPDATE\s+.*\bSET\b', stmt):
             continue
         cleaned_statements.append(stmt)
     sql = '; '.join(cleaned_statements)
     
-    # Remove DECLARE statements
     sql = re.sub(r'(?i)\bDECLARE\s+[^;]+;?', '', sql)
-    
-    # Remove DDL statements (CREATE, ALTER, DROP) - match entire statement
     sql = re.sub(r'(?i)\b(CREATE|ALTER|DROP)\s+[^;]+;?', '', sql)
     
-    # Remove WITH (NOLOCK) hints - multiple patterns
-    sql = re.sub(r'(?i)\s+WITH\s*\(\s*NOLOCK\s*\)', '', sql)
+    # Remove SQL Server hints (comprehensive list)
+    hints_pattern = r'(?i)\s+WITH\s*\(\s*(NOLOCK|READPAST|READUNCOMMITTED|READCOMMITTED|REPEATABLEREAD|SERIALIZABLE|UPDLOCK|XLOCK|ROWLOCK|PAGLOCK|TABLOCK|TABLOCKX|FASTFIRSTROW|FORCESEEK|FORCESCAN|NOWAIT|READCOMMITTEDLOCK|READPASTLOCK)\s*\)'
+    sql = re.sub(hints_pattern, '', sql)
     sql = re.sub(r'(?i)\(\s*NOLOCK\s*\)', '', sql)
     sql = re.sub(r'(?i)\s+\(NOLOCK\)', '', sql)
-    
-    # Remove TOP clause (but keep the rest of the SELECT)
     sql = re.sub(r'(?i)\bTOP\s*\(\s*\d+\s*\)\s+', '', sql)
     sql = re.sub(r'(?i)\bTOP\s+\d+\s+', '', sql)
     
-    # Remove ANSI escape sequences comprehensively
-    # Order matters: remove complete sequences BEFORE removing standalone escape chars
-    
-    # Handle CSI sequences starting with \x9B FIRST (before removing \x9B standalone)
-    # CSI sequences: \x9B[ followed by digits/semicolons, then ending char
     ansi_csi = re.compile(r'\x9B\[[0-9;]*[a-zA-Z@-~]')
     sql = ansi_csi.sub('', sql)
-    
-    # Also catch any \x9B sequences that might be malformed or different format
     sql = re.sub(r'\x9B[^\x20-\x7E]*', '', sql)
     
-    # ANSI escape codes can start with \x1B (ESC), \033 (octal), or \x9B (CSI)
-    # Pattern matches: ESC[@-Z\\-_] (single char commands) or ESC[[0-?]*[/]*[@~~] (CSI sequences)
-    # This covers SGR codes ([...m), cursor movement, colors, etc.
     ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[/]*[@-~])')
     sql = ansi_escape.sub('', sql)
-    
-    # Also handle octal escape sequences (\033)
     ansi_escape_octal = re.compile(r'\033(?:[@-Z\\-_]|\[[0-?]*[/]*[@-~])')
     sql = ansi_escape_octal.sub('', sql)
     
-    # Handle OSC (Operating System Command) sequences: ESC ] ... BEL or ESC \
-    # Used for window titles, clipboard manipulation, etc.
-    # Pattern: ESC ] followed by any characters until BEL (0x07) or ESC \
     sql = re.sub(r'\x1B\][^\x07\x1B]*(\x07|\x1B\\)', '', sql)
     sql = re.sub(r'\033\][^\x07\x1B]*(\x07|\x1B\\)', '', sql)
-    
-    # Handle DCS (Device Control String) sequences: ESC P ... ESC \
-    # Used for device-specific controls
-    # Pattern: ESC P (no space between ESC and P) followed by any characters until ESC \
     sql = re.sub(r'\x1B P[^\x1B]*\x1B\\', '', sql)
     sql = re.sub(r'\033 P[^\x1B]*\x1B\\', '', sql)
-    
-    # Handle PM (Privacy Message) sequences: ESC ^ ... ESC \
-    # Pattern: ESC ^ (no space) followed by any characters until ESC \
     sql = re.sub(r'\x1B\^[^\x1B]*\x1B\\', '', sql)
     sql = re.sub(r'\033\^[^\x1B]*\x1B\\', '', sql)
-    
-    # Handle APC (Application Program Command) sequences: ESC _ ... ESC \
-    # Pattern: ESC _ (no space) followed by any characters until ESC \
     sql = re.sub(r'\x1B_[^\x1B]*\x1B\\', '', sql)
     sql = re.sub(r'\033_[^\x1B]*\x1B\\', '', sql)
     
-    # Remove ANSI escape sequences that lost their escape character (just [...m, [...H, etc.)
-    # Match [ followed by parameter bytes (0x30-0x3F), intermediate bytes (0x20-0x2F), final byte (0x40-0x7E)
     sql = re.sub(r'\[[\x20-\x3F]*[\x40-\x7E]', '', sql)
-    
-    # Remove standalone escape characters that might be left behind (do this LAST)
-    sql = re.sub(r'[\x1B\x9B]', '', sql)  # ESC and CSI characters
-    
-    # Remove string literal escape codes (like \x1b, \033, \n, \t, etc. in string literals)
-    # But be careful - we don't want to remove actual SQL escape sequences
-    # Only remove if they appear outside of quoted strings (rough heuristic)
-    # This is safer - just remove obvious problematic patterns
-    sql = re.sub(r'\\x1[bB]', '', sql)  # \x1b or \x1B
-    sql = re.sub(r'\\033', '', sql)     # \033
-    sql = re.sub(r'\\x9[bB]', '', sql)  # \x9b or \x9B
-    
-    # Remove other escape sequences that might cause issues
-    sql = re.sub(r'\\x[0-9a-fA-F]{2}', '', sql)  # Any \xXX hex escape
-    sql = re.sub(r'\\[0-7]{1,3}', '', sql)        # Octal escapes (\0 to \377)
-    
-    # Remove ASCII control characters (except newline \n=0x0A, tab \t=0x09, carriage return \r=0x0D)
-    # Keep: \x09 (tab), \x0A (LF), \x0D (CR)
-    # Remove: \x00-\x08 (including BEL=0x07, BS=0x08), \x0B-\x0C, \x0E-\x1F, \x7F (DEL)
+    sql = re.sub(r'[\x1B\x9B]', '', sql)
+    sql = re.sub(r'\\x1[bB]', '', sql)
+    sql = re.sub(r'\\033', '', sql)
+    sql = re.sub(r'\\x9[bB]', '', sql)
+    sql = re.sub(r'\\x[0-9a-fA-F]{2}', '', sql)
+    sql = re.sub(r'\\[0-7]{1,3}', '', sql)
     sql = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', sql)
-    
-    # Remove Unicode control characters and zero-width characters comprehensively
-    # Zero-width space (\u200B), zero-width non-joiner (\u200C), zero-width joiner (\u200D)
-    # Left-to-right mark (\u200E), right-to-left mark (\u200F)
-    # BOM (\uFEFF), word joiner (\u2060), invisible separator (\u2063)
-    # Mathematical invisible characters (\u2061-\u2064)
-    # Line separator (\u2028), paragraph separator (\u2029)
-    # Various other Unicode control characters
     sql = re.sub(r'[\u200B-\u200F\uFEFF\u2060\u2061-\u2064\u2028\u2029\u2066-\u2069\u061C\u2000-\u200A]', '', sql)
-    
-    # Remove other Unicode formatting characters (soft hyphen, etc.)
     sql = re.sub(r'[\u00AD\u034F\u180E]', '', sql)
     
-    # Remove BOM (Byte Order Mark) if present
-    if sql.startswith('\ufeff'):
-        sql = sql[1:]
+    # Remove other Unicode control characters
+    sql = re.sub(r'[\u202A-\u202E\u206A-\u206F\uFFF0-\uFFFF]', '', sql)
+    
+    # Remove non-breaking spaces and other Unicode spaces
+    sql = re.sub(r'[\u00A0\u2000-\u200B\u202F\u205F\u3000]', ' ', sql)
     
     # Remove other non-printable Unicode characters (but keep common punctuation and letters)
-    # Keep printable ASCII (\x20-\x7E) and common whitespace (\n, \r, \t)
     sql = re.sub(r'[^\x20-\x7E\n\r\t]', '', sql)
     
     # Normalize whitespace
-    # Replace multiple spaces/tabs with single space
     sql = re.sub(r'[ \t]+', ' ', sql)
-    # Replace multiple newlines with single newline
     sql = re.sub(r'\n{2,}', '\n', sql)
-    # Remove trailing whitespace from lines
     sql = re.sub(r'[ \t]+$', '', sql, flags=re.MULTILINE)
-    # Remove leading/trailing whitespace
     sql = sql.strip()
     
     return sql
@@ -361,16 +319,14 @@ def build_alias_map(stmt: exp.Expression) -> dict:
     alias_map = {}
     cte_names = set()
     
-    # First, collect all CTE names
     for cte in stmt.find_all(exp.CTE):
         if cte.alias:
             cte_name = cte.alias if isinstance(cte.alias, str) else cte.alias.name if hasattr(cte.alias, 'name') else str(cte.alias)
             if cte_name:
                 cte_names.add(cte_name)
-                # Map CTE name to itself (store both original case and lowercase)
                 alias_map[cte_name] = cte_name
                 if isinstance(cte_name, str):
-                    alias_map[cte_name.lower()] = cte_name  # Case-insensitive lookup
+                    alias_map[cte_name.lower()] = cte_name
     
     def extract_table_alias(table_expr, alias_map, cte_names, context_cte_names=None):
         """Extract table name and alias from a table expression."""
@@ -378,7 +334,6 @@ def build_alias_map(stmt: exp.Expression) -> dict:
             context_cte_names = set()
         
         if isinstance(table_expr, exp.Table):
-            # Get actual table name
             table_name = table_expr.name
             if not table_name:
                 return
@@ -392,8 +347,6 @@ def build_alias_map(stmt: exp.Expression) -> dict:
                 parts.append(table_name)
             
             full_table_name = ".".join(parts) if parts else table_name
-            
-            # Get alias if present
             alias = table_expr.alias
             alias_name = None
             if alias:
@@ -410,27 +363,20 @@ def build_alias_map(stmt: exp.Expression) -> dict:
                 else:
                     alias_name = str(alias)
             
-            # Determine what to map the alias/table to
-            # Check both global CTE names and context CTE names (for recursive CTEs)
             if table_name in cte_names or table_name in context_cte_names:
-                # This is a CTE, use CTE name
                 resolved_name = table_name
             else:
-                # This is a real table, use full table name
                 resolved_name = full_table_name
             
-            # Map alias to resolved name (store both original case and lowercase for case-insensitive lookup)
             if alias_name:
                 alias_map[alias_name] = resolved_name
-                alias_map[alias_name.lower()] = resolved_name  # Case-insensitive lookup
+                alias_map[alias_name.lower()] = resolved_name
             
-            # Also map table name to itself (in case it's used without alias)
             alias_map[table_name] = resolved_name
             if isinstance(table_name, str):
-                alias_map[table_name.lower()] = resolved_name  # Case-insensitive lookup
+                alias_map[table_name.lower()] = resolved_name
         
         elif isinstance(table_expr, exp.Subquery):
-            # Handle subqueries - get alias if present
             alias = table_expr.alias
             if alias:
                 if isinstance(alias, exp.TableAlias):
@@ -445,17 +391,12 @@ def build_alias_map(stmt: exp.Expression) -> dict:
                     alias_name = alias
                 else:
                     alias_name = str(alias)
-                
-                if alias_name:
-                    # For subqueries, we can't resolve to a real table, so skip
-                    pass
     
     def extract_from_joins(expression, context_cte_names=None):
         """Recursively extract table aliases from FROM and JOIN clauses."""
         if context_cte_names is None:
             context_cte_names = set()
         
-        # Collect CTE names in this context (for recursive CTEs)
         local_cte_names = set(context_cte_names)
         for cte in expression.find_all(exp.CTE):
             if cte.alias:
@@ -464,40 +405,33 @@ def build_alias_map(stmt: exp.Expression) -> dict:
                     local_cte_names.add(cte_name)
         
         if isinstance(expression, exp.Select):
-            # Get the FROM clause (can be 'from' or 'from_')
             from_expr = expression.args.get("from") or expression.args.get("from_")
             if from_expr:
                 if isinstance(from_expr, exp.From):
                     extract_table_alias(from_expr.this, alias_map, cte_names, local_cte_names)
                 elif isinstance(from_expr, exp.Table):
-                    # Sometimes FROM is directly a Table
                     extract_table_alias(from_expr, alias_map, cte_names, local_cte_names)
             
-            # Get all JOINs
             for join in expression.args.get("joins", []):
                 if isinstance(join, exp.Join):
                     extract_table_alias(join.this, alias_map, cte_names, local_cte_names)
         
-        # Recursively process UNION/UNION ALL
         if isinstance(expression, (exp.Union, exp.Except, exp.Intersect)):
             if expression.this:
                 extract_from_joins(expression.this, local_cte_names)
             if expression.expression:
                 extract_from_joins(expression.expression, local_cte_names)
         
-        # Recursively process CTEs
         for cte in expression.find_all(exp.CTE):
             if cte.this:
                 extract_from_joins(cte.this, local_cte_names)
         
-        # Recursively process subqueries
         for subquery in expression.find_all(exp.Subquery):
             if subquery.this:
                 extract_from_joins(subquery.this, local_cte_names)
         
-        # Recursively process all SELECT statements
         for select_stmt in expression.find_all(exp.Select):
-            if select_stmt != expression:  # Avoid reprocessing current statement
+            if select_stmt != expression:
                 extract_from_joins(select_stmt, local_cte_names)
     
     extract_from_joins(stmt)
@@ -512,17 +446,15 @@ def resolve_unqualified_columns(stmt: exp.Expression, alias_map: dict) -> dict:
     """
     column_to_table = {}
     
-    # Create case-insensitive alias map for lookups
     case_insensitive_alias_map = {}
     for key, value in alias_map.items():
         case_insensitive_alias_map[key.lower()] = value
-        case_insensitive_alias_map[key] = value  # Keep original case too
+        case_insensitive_alias_map[key] = value
     
     def get_tables_from_from_clause(select_stmt):
         """Get all table names from FROM and JOIN clauses."""
         tables = []
         
-        # Get FROM clause
         from_expr = select_stmt.args.get("from") or select_stmt.args.get("from_")
         if from_expr:
             if isinstance(from_expr, exp.From):
@@ -530,14 +462,12 @@ def resolve_unqualified_columns(stmt: exp.Expression, alias_map: dict) -> dict:
                 if isinstance(table_expr, exp.Table):
                     table_name = table_expr.name if isinstance(table_expr.name, str) else str(table_expr.name)
                     if table_name:
-                        # Resolve alias if present
                         alias = table_expr.alias
                         if alias:
                             if isinstance(alias, exp.TableAlias):
                                 alias_name = alias.this.name if isinstance(alias.this, exp.Identifier) else str(alias.this)
                             else:
                                 alias_name = str(alias)
-                            # Try case-insensitive lookup
                             resolved = case_insensitive_alias_map.get(alias_name.lower()) or case_insensitive_alias_map.get(alias_name) or alias_map.get(alias_name)
                             if resolved:
                                 tables.append(resolved)
@@ -550,7 +480,6 @@ def resolve_unqualified_columns(stmt: exp.Expression, alias_map: dict) -> dict:
                             else:
                                 tables.append(table_name)
         
-        # Get JOINs
         for join in select_stmt.args.get("joins", []):
             if isinstance(join, exp.Join):
                 table_expr = join.this
@@ -586,14 +515,11 @@ def resolve_unqualified_columns(stmt: exp.Expression, alias_map: dict) -> dict:
         """
         tables = get_tables_from_from_clause(select_stmt)
         
-        # Case 1: Single table - easy
         if len(tables) == 1:
             return tables[0]
         
-        # Case 2: Check JOIN conditions for this column
         for join in select_stmt.args.get("joins", []):
             if isinstance(join, exp.Join):
-                # Check if this column appears in the JOIN condition
                 join_condition = join.args.get("on") or join.args.get("using")
                 if join_condition:
                     for col in join_condition.find_all(exp.Column):
@@ -601,14 +527,12 @@ def resolve_unqualified_columns(stmt: exp.Expression, alias_map: dict) -> dict:
                             col_name = col.name if isinstance(col.name, str) else str(col.name)
                             if col_name.lower() == column_name.lower():
                                 if col.table:
-                                    # Column has table prefix in JOIN
                                     table_ref = col.table if isinstance(col.table, str) else str(col.table)
                                     resolved = case_insensitive_alias_map.get(table_ref.lower()) or alias_map.get(table_ref)
                                     if resolved:
                                         return resolved
                                     return table_ref
         
-        # Case 3: Check if column appears with table prefix elsewhere in WHERE/HAVING
         where_clause = select_stmt.args.get("where")
         if where_clause:
             for col in where_clause.find_all(exp.Column):
@@ -621,7 +545,6 @@ def resolve_unqualified_columns(stmt: exp.Expression, alias_map: dict) -> dict:
                             return resolved
                         return table_ref
         
-        # Case 4: If we can't determine, return None (will skip this column)
         return None
     
     # Process all SELECT statements
