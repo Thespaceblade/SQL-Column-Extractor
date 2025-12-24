@@ -253,6 +253,10 @@ def preprocess_sql(sql: str) -> str:
     - Non-printable characters
     - Normalize whitespace
     """
+    # Handle None or invalid input
+    if sql is None or not isinstance(sql, str):
+        return ""
+    
     sql = decode_html_entities(sql)
     
     # Handle BOM variants (UTF-8, UTF-16 BE/LE)
@@ -1021,6 +1025,10 @@ def fallback_extract_columns(sql: str, enable_unqualified_resolution: bool = Tru
     if not SQLPARSE_AVAILABLE:
         return []
     
+    # Handle None or invalid input
+    if sql is None or not isinstance(sql, str) or not sql.strip():
+        return []
+    
     columns = []
     
     try:
@@ -1099,6 +1107,14 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
         Only includes columns that have a table reference (no standalone columns or tables)
     """
     columns = []
+    
+    # Handle None or empty SQL input
+    if sql is None:
+        return [], "PARSE_ERROR"
+    if not isinstance(sql, str):
+        return [], "PARSE_ERROR"
+    if not sql.strip():
+        return [], "PARSE_ERROR"
     
     # Normalize dialect name (convert mssql -> tsql, etc.) - defaults to 'tsql'
     dialect = normalize_dialect(dialect)
