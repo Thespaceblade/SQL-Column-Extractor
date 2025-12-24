@@ -1744,20 +1744,54 @@ def main():
         # Excel output
         try:
             import pandas as pd
+            from openpyxl import load_workbook
+            from openpyxl.utils import get_column_letter
+            
+            # Sort column_data by ReportName, Dataset, ColumnName
+            sorted_column_data = sorted(column_data, key=lambda x: (
+                str(x[0]) if x[0] else '',  # ReportName
+                str(x[1]) if x[1] else '',  # Dataset
+                str(x[2]) if x[2] else ''   # ColumnName
+            ))
             
             # Create DataFrame with ReportName, Dataset, and ColumnName
             # Ensure all values are strings and handle None/empty values
             df = pd.DataFrame({
-                'ReportName': [str(report) if report else '' for report, _, _ in column_data],
-                'Dataset': [str(dataset) if dataset else '' for _, dataset, _ in column_data],
-                'ColumnName': [str(col) if col else '' for _, _, col in column_data]
+                'ReportName': [str(report) if report else '' for report, _, _ in sorted_column_data],
+                'Dataset': [str(dataset) if dataset else '' for _, dataset, _ in sorted_column_data],
+                'ColumnName': [str(col) if col else '' for _, _, col in sorted_column_data]
             })
             
             df.to_excel(output_path, index=False)
+            
+            # Auto-format column widths and add filters
+            wb = load_workbook(output_path)
+            ws = wb.active
+            
+            # Auto-size columns
+            for col in ws.columns:
+                max_length = 0
+                column_letter = get_column_letter(col[0].column)
+                for cell in col:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 50)  # Cap at 50 characters
+                ws.column_dimensions[column_letter].width = adjusted_width
+            
+            # Add filter to first row
+            ws.auto_filter.ref = ws.dimensions
+            
+            wb.save(output_path)
+            
             abs_path = output_path.absolute()
             logger.info(f"Excel output written successfully: {abs_path}")
             logger.info(f"  Rows: {len(df)} (unique columns per file)")
             logger.info(f"  Columns: ReportName, Dataset, ColumnName")
+            logger.info(f"  Sorted by: ReportName, Dataset, ColumnName")
+            logger.info(f"  Auto-formatted column widths and filters applied")
             print("\n" + "="*80)
             print("OUTPUT FILE LOCATION:")
             print("="*80)
@@ -1766,6 +1800,8 @@ def main():
             print(f"\n✓ Output written to: {abs_path}")
             print(f"  Rows: {len(df)} (unique columns per file)")
             print(f"  Columns: ReportName, Dataset, ColumnName")
+            print(f"  Sorted by: ReportName, Dataset, ColumnName")
+            print(f"  Auto-formatted column widths and filters applied")
             print(f"  Output directory: {output_dir.absolute()}")
             print(f"  Log file: {log_file.absolute()}")
             print(f"  Errors file: {errors_file.absolute()}")
@@ -1786,11 +1822,18 @@ def main():
     if output_path.suffix.lower() == '.csv':
         # CSV output
         try:
+            # Sort column_data by ReportName, Dataset, ColumnName
+            sorted_column_data = sorted(column_data, key=lambda x: (
+                str(x[0]) if x[0] else '',  # ReportName
+                str(x[1]) if x[1] else '',  # Dataset
+                str(x[2]) if x[2] else ''   # ColumnName
+            ))
+            
             with open(output_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow(['ReportName', 'Dataset', 'ColumnName'])  # Header
                 
-                for report_name, dataset, col in column_data:
+                for report_name, dataset, col in sorted_column_data:
                     # Ensure all values are strings and handle None/empty values
                     safe_report = str(report_name) if report_name else ''
                     safe_dataset = str(dataset) if dataset else ''
@@ -1799,16 +1842,18 @@ def main():
             
             abs_path = output_path.absolute()
             logger.info(f"CSV output written successfully: {abs_path}")
-            logger.info(f"  Rows: {len(column_data)} (unique columns per file)")
+            logger.info(f"  Rows: {len(sorted_column_data)} (unique columns per file)")
             logger.info(f"  Columns: ReportName, Dataset, ColumnName")
+            logger.info(f"  Sorted by: ReportName, Dataset, ColumnName")
             print("\n" + "="*80)
             print("OUTPUT FILE LOCATION:")
             print("="*80)
             print(f"  {abs_path}")
             print("="*80)
             print(f"\n✓ Output written to: {abs_path}")
-            print(f"  Rows: {len(column_data)} (unique columns per file)")
+            print(f"  Rows: {len(sorted_column_data)} (unique columns per file)")
             print(f"  Columns: ReportName, Dataset, ColumnName")
+            print(f"  Sorted by: ReportName, Dataset, ColumnName")
             print(f"  Output directory: {output_dir.absolute()}")
             print(f"  Log file: {log_file.absolute()}")
             print(f"  Errors file: {errors_file.absolute()}")
