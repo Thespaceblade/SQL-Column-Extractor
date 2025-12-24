@@ -5,12 +5,16 @@ Extract table.column references from SQL files and output to CSV/Excel format. P
 ## Features
 
 - Extracts fully qualified table.column references from SQL queries
-- Resolves table aliases to actual table names (handles bracketed aliases correctly, strips brackets for clean output)
+- **Guaranteed no aliases in output** - All table aliases are resolved to actual table names
+- **Scope-aware alias resolution** - Correctly handles alias shadowing in nested queries (e.g., same alias `[t]` in outer query vs subquery resolves to different tables)
+- **Enhanced alias lookup** - Multiple fallback strategies ensure maximum resolution success (case-insensitive, bracket-aware, scope-aware)
+- **Strict validation** - Unresolved aliases are filtered out to prevent aliases from appearing in output
 - Handles unqualified columns by inferring table names from context with fallback
 - Processes folders recursively (searches all subdirectories)
 - Filters out datasets matching exclusion patterns (SOR%, Tablix, EndDate, EvidenceTab, EvidenceTablix)
 - Output sorted by ReportName, Dataset, ColumnName
 - Excel output with auto-formatted column widths and filters
+- Robust error handling for None/empty/invalid input
 - Supports complex SQL features:
   - CTEs (Common Table Expressions), including recursive CTEs
   - Subqueries and derived tables
@@ -22,6 +26,9 @@ Extract table.column references from SQL files and output to CSV/Excel format. P
   - WHERE, HAVING, and JOIN conditions
   - UNION, INTERSECT, EXCEPT operations
 - Case-insensitive alias resolution
+- Scope-aware alias resolution (handles alias shadowing in nested queries)
+- Enhanced alias lookup with multiple fallback strategies
+- Strict validation prevents unresolved aliases from appearing in output
 - Handles bracketed aliases correctly (e.g., `SELECT [u].id FROM users [u]` resolves to `users.id`)
 - Strips brackets from identifiers for clean output (e.g., `[dbo].[users].[id]` → `dbo.users.id`)
 - Preprocesses SQL to handle edge cases:
@@ -179,19 +186,53 @@ bracketed_aliases,Default,dbo.users.email
 bracketed_aliases,Default,dbo.users.id
 ```
 
+**Input SQL File** (alias shadowing - same alias in different scopes): `alias_shadowing.sql`
+```sql
+SELECT [t].[Column1], [t].[Column2]
+FROM [Schema1].[Table1] [t]
+WHERE EXISTS (
+    SELECT 1
+    FROM [Schema2].[Table2] [t]
+    WHERE [t].[Column3] = 'test'
+);
+```
+
+**Output CSV** (scope-aware resolution - each `[t]` resolves to its own scope's table):
+```csv
+ReportName,Dataset,ColumnName
+alias_shadowing,Default,Schema1.Table1.Column1
+alias_shadowing,Default,Schema1.Table1.Column2
+alias_shadowing,Default,Schema2.Table2.Column3
+```
+
+Note: The same alias `[t]` in the outer query resolves to `Schema1.Table1`, while `[t]` in the subquery resolves to `Schema2.Table2`. This is handled correctly by scope-aware alias resolution.
+
 ## How It Works
 
 1. **Filename Parsing**: Extracts Report Name and Dataset from SQL filename
 2. **Dataset Filtering**: Skips files with excluded dataset names (SOR%, Tablix, EndDate, EvidenceTab, EvidenceTablix)
-3. **Preprocessing**: Removes comments, DDL statements, and other non-query SQL while preserving bracketed identifiers
-4. **Parsing**: Uses sqlglot to parse SQL into an Abstract Syntax Tree (AST), with regex fallback for unparseable SQL
-5. **Alias Resolution**: Builds a map of table aliases to actual table names, handling both bracketed and unbracketed aliases (e.g., `[u]` and `u` both resolve correctly)
-6. **Column Extraction**: Traverses the AST to find all column references
-7. **Qualification**: Resolves unqualified columns to their source tables with fallback to first table in FROM clause
-8. **Bracket Stripping**: Removes SQL Server brackets from all identifiers (aliases, table names, schema names, column names) for clean output (e.g., `[dbo].[users].[id]` → `dbo.users.id`)
-9. **Deduplication**: Removes duplicate columns within each file (keeps unique per file)
-10. **Sorting**: Sorts output by ReportName, Dataset, ColumnName
-11. **Output**: Writes results to CSV or Excel format with auto-formatting and filters (Excel only)
+3. **Input Validation**: Validates SQL input (handles None, empty strings, invalid input gracefully)
+4. **Preprocessing**: Removes comments, DDL statements, and other non-query SQL while preserving bracketed identifiers
+5. **Parsing**: Uses sqlglot to parse SQL into an Abstract Syntax Tree (AST), with regex fallback for unparseable SQL
+6. **Scope-Aware Alias Resolution**: 
+   - Builds per-SELECT scope alias maps with parent scope inheritance
+   - Each SELECT scope can have its own aliases that shadow parent scope aliases
+   - Correctly resolves aliases like `[t]` in outer query vs `[t]` in subquery to different tables
+7. **Enhanced Alias Lookup**: 
+   - Tries scope-aware lookup first, then global lookup
+   - Strips brackets and retries if initial lookup fails
+   - Tries case variations (upper, title) for additional matching
+   - Handles both bracketed and unbracketed aliases (e.g., `[u]` and `u` both resolve correctly)
+8. **Strict Validation**: 
+   - Distinguishes between resolved table names and unresolved aliases
+   - Only includes columns with valid table references
+   - Filters out columns with unresolved aliases to prevent aliases in output
+9. **Column Extraction**: Traverses the AST to find all column references
+10. **Qualification**: Resolves unqualified columns to their source tables with fallback to first table in FROM clause
+11. **Bracket Stripping**: Removes SQL Server brackets from all identifiers (aliases, table names, schema names, column names) for clean output (e.g., `[dbo].[users].[id]` → `dbo.users.id`)
+12. **Deduplication**: Removes duplicate columns within each file (keeps unique per file)
+13. **Sorting**: Sorts output by ReportName, Dataset, ColumnName
+14. **Output**: Writes results to CSV or Excel format with auto-formatting and filters (Excel only)
 
 ## Supported SQL Features
 
@@ -208,6 +249,8 @@ bracketed_aliases,Default,dbo.users.id
 
 - Unqualified columns in multi-table queries use fallback to first table in FROM clause if table cannot be determined from context
 - Columns with unresolvable table references (e.g., nonexistent_table.column) are skipped, except for originally unqualified columns which are included with fallback table
+- Derived table references (subqueries, CROSS APPLY results) appear as `derived_alias.column` since there's no underlying physical table (this is correct behavior)
+- CTE references appear as `CTE_name.column` (this is correct behavior for CTEs)
 - Some SQL dialects may require explicit `--dialect` specification
 - Very large SQL files may take longer to process
 - CSV format does not support filters or auto-formatting (Excel only)
