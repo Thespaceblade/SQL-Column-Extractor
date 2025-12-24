@@ -128,6 +128,7 @@ def should_skip_dataset(dataset: str) -> bool:
     - SOR% (e.g., SOR_DATA, SOR_REFRESH, SORDATA, etc.)
     - Tablix
     - EndDate
+    - EvidenceTab
     
     Args:
         dataset: Dataset name to check
@@ -147,6 +148,10 @@ def should_skip_dataset(dataset: str) -> bool:
     
     # Check for EndDate (case-insensitive)
     if 'ENDDATE' in dataset_upper:
+        return True
+    
+    # Check for EvidenceTab (case-insensitive)
+    if 'EVIDENCETAB' in dataset_upper:
         return True
     
     return False
