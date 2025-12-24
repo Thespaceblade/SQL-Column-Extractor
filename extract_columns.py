@@ -120,6 +120,38 @@ def parse_filename(filepath: Path) -> tuple[str, str]:
     return report_name, dataset
 
 
+def should_skip_dataset(dataset: str) -> bool:
+    """
+    Check if a dataset should be skipped based on name patterns.
+    
+    Skips datasets containing:
+    - SOR% (e.g., SOR_DATA, SOR_REFRESH, SORDATA, etc.)
+    - Tablix
+    - EndDate
+    
+    Args:
+        dataset: Dataset name to check
+        
+    Returns:
+        bool: True if dataset should be skipped
+    """
+    dataset_upper = dataset.upper()
+    
+    # Check for SOR% pattern (case-insensitive)
+    if 'SOR' in dataset_upper:
+        return True
+    
+    # Check for Tablix (case-insensitive)
+    if 'TABLIX' in dataset_upper:
+        return True
+    
+    # Check for EndDate (case-insensitive)
+    if 'ENDDATE' in dataset_upper:
+        return True
+    
+    return False
+
+
 def decode_html_entities(sql: str) -> str:
     """
     Convert HTML encoded characters to their actual symbols.
@@ -1442,6 +1474,12 @@ def main():
             # Parse filename to get report name and dataset
             report_name, dataset = parse_filename(sql_file)
             logger.info(f"  Parsed: Report='{report_name}', Dataset='{dataset}'")
+            
+            # Skip files with excluded dataset names
+            if should_skip_dataset(dataset):
+                logger.info(f"  Skipping file (dataset '{dataset}' matches exclusion pattern)")
+                print(f"  Skipping: {sql_file.name} (dataset '{dataset}' matches exclusion pattern)")
+                continue
             
             # Store full relative path or just filename for file_columns tracking
             file_key = str(sql_file.relative_to(Path.cwd())) if sql_file.is_relative_to(Path.cwd()) else str(sql_file)
