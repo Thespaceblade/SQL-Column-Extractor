@@ -281,7 +281,8 @@ def preprocess_sql(sql: str) -> str:
     sql = re.sub(r'\x1B_[^\x1B]*\x1B\\', '', sql)
     sql = re.sub(r'\033_[^\x1B]*\x1B\\', '', sql)
     
-    sql = re.sub(r'\[[\x20-\x3F]*[\x40-\x7E]', '', sql)
+    # Remove standalone escape characters (ESC and CSI) - do this AFTER removing complete sequences
+    # This won't affect SQL brackets [], quotes "", or other valid SQL syntax
     sql = re.sub(r'[\x1B\x9B]', '', sql)
     sql = re.sub(r'\\x1[bB]', '', sql)
     sql = re.sub(r'\\033', '', sql)
@@ -602,10 +603,9 @@ def format_parse_error(error: Exception, sql: str, dialect: Optional[str] = None
             # Use the first error's description (most relevant)
             first_error = error.errors[0]
             error_description = first_error.get('description', str(error))
-            # Clean ANSI codes from error description
+            # Clean ANSI codes from error description (only sequences with ESC/CSI)
             error_description = re.sub(r'\x1b\[[0-9;]*m', '', error_description)
             error_description = re.sub(r'\033\[[0-9;]*m', '', error_description)
-            error_description = re.sub(r'\[[0-9;]*m', '', error_description)
             error_msg.append(f"Error: {error_description}")
             
             # Extract line and column from error structure
@@ -619,10 +619,9 @@ def format_parse_error(error: Exception, sql: str, dialect: Optional[str] = None
         else:
             # Fallback to string representation
             error_str = str(error)
-            # Remove ANSI codes from error message if present
+            # Remove ANSI codes from error message (only sequences with ESC/CSI)
             error_str = re.sub(r'\x1b\[[0-9;]*m', '', error_str)
             error_str = re.sub(r'\033\[[0-9;]*m', '', error_str)
-            error_str = re.sub(r'\[[0-9;]*m', '', error_str)
             error_msg.append(f"Error: {error_str}")
             
             # Try to find line number in error message
@@ -636,10 +635,9 @@ def format_parse_error(error: Exception, sql: str, dialect: Optional[str] = None
     else:
         # For non-ParseError exceptions
         error_str = str(error)
-        # Remove ANSI codes from error message if present
+        # Remove ANSI codes from error message (only sequences with ESC/CSI)
         error_str = re.sub(r'\x1b\[[0-9;]*m', '', error_str)
         error_str = re.sub(r'\033\[[0-9;]*m', '', error_str)
-        error_str = re.sub(r'\[[0-9;]*m', '', error_str)
         error_msg.append(f"Error: {error_str}")
         
         # Try to find line number in error message
@@ -1012,11 +1010,10 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
             # Store error for this dialect attempt
             if error_details is not None:
                 formatted_error = format_parse_error(e, sql, try_dialect)
-                # Clean ANSI codes from error string
+                # Clean ANSI codes from error string (only sequences with ESC/CSI)
                 error_str = str(e)
                 error_str = re.sub(r'\x1b\[[0-9;]*m', '', error_str)
                 error_str = re.sub(r'\033\[[0-9;]*m', '', error_str)
-                error_str = re.sub(r'\[[0-9;]*m', '', error_str)
                 error_details.append({
                     'statement': 'all',
                     'dialect': try_dialect or 'tsql',
@@ -1035,11 +1032,10 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
             # Store error for this dialect attempt
             if error_details is not None:
                 formatted_error = format_parse_error(e, sql, try_dialect)
-                # Clean ANSI codes from error string
+                # Clean ANSI codes from error string (only sequences with ESC/CSI)
                 error_str = str(e)
                 error_str = re.sub(r'\x1b\[[0-9;]*m', '', error_str)
                 error_str = re.sub(r'\033\[[0-9;]*m', '', error_str)
-                error_str = re.sub(r'\[[0-9;]*m', '', error_str)
                 error_details.append({
                     'statement': 'all',
                     'dialect': try_dialect or 'tsql',
