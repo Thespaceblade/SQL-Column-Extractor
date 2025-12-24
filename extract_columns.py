@@ -1046,6 +1046,9 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                             if table_name and not isinstance(table_name, str):
                                 table_name = str(table_name)
                             
+                            # Track if this column was already qualified (has table reference)
+                            is_qualified_column = bool(table_name)
+                            
                             # If column is unqualified, try to resolve it (case-insensitive)
                             if not table_name:
                                 col_name = col.name if isinstance(col.name, str) else str(col.name)
@@ -1054,6 +1057,7 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                                             unqualified_map.get(col_name.lower()))
                             
                             # Only include columns that have a table reference
+                            # BUT: if column was already qualified (has table_name), include it even if not resolved
                             if not table_name:
                                 # Skip columns without table reference
                                 continue
@@ -1064,6 +1068,9 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                             # Add catalog if present
                             if col.catalog:
                                 parts.append(col.catalog if isinstance(col.catalog, str) else str(col.catalog))
+                            
+                            # Track if we already have schema info from col.db
+                            has_schema_from_col = bool(col.db)
                             
                             # Add database/schema if present
                             if col.db:
@@ -1079,9 +1086,24 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                                 actual_table = resolved_table
                                 # Split the actual table name and use its parts
                                 table_parts = actual_table.split('.')
-                                parts.extend(table_parts)
+                                
+                                # If col.db was already added, avoid duplicating schema
+                                # Check if first part of resolved table matches col.db
+                                if has_schema_from_col and len(table_parts) > 1:
+                                    # Skip the schema part if it matches col.db
+                                    if table_parts[0].lower() == (col.db if isinstance(col.db, str) else str(col.db)).lower():
+                                        # Use only table name, schema already in parts
+                                        parts.extend(table_parts[1:])
+                                    else:
+                                        # Different schema, include all parts
+                                        parts.extend(table_parts)
+                                else:
+                                    # No schema in col.db, include all parts from resolved table
+                                    parts.extend(table_parts)
                             else:
-                                # Use table name as-is if not in alias map
+                                # Table name not in alias map - use as-is
+                                # If column was already qualified, include it (this handles cases like
+                                # SELECT users.id FROM dbo.users where "users" isn't in alias_map)
                                 parts.append(table_name_str)
                             
                             # Add column name
