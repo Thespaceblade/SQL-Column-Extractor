@@ -5,7 +5,7 @@ Extract table.column references from SQL files and output to CSV/Excel format. P
 ## Features
 
 - Extracts fully qualified table.column references from SQL queries
-- Resolves table aliases to actual table names (strips brackets for clean output)
+- Resolves table aliases to actual table names (handles bracketed aliases correctly, strips brackets for clean output)
 - Handles unqualified columns by inferring table names from context with fallback
 - Processes folders recursively (searches all subdirectories)
 - Filters out datasets matching exclusion patterns (SOR%, Tablix, EndDate, EvidenceTab, EvidenceTablix)
@@ -18,7 +18,8 @@ Extract table.column references from SQL files and output to CSV/Excel format. P
   - Window functions
   - WHERE, HAVING, and JOIN conditions
 - Case-insensitive alias resolution
-- Preserves SQL Server bracketed identifiers during parsing
+- Handles bracketed aliases correctly (e.g., `SELECT [u].id FROM users [u]` resolves to `users.id`)
+- Strips brackets from identifiers for clean output (e.g., `[dbo].[users].[id]` → `dbo.users.id`)
 - Preprocesses SQL to handle edge cases:
   - Removes SQL comments
   - Removes DDL statements (CREATE, ALTER, DROP)
@@ -157,16 +158,33 @@ simple_query,Default,dbo.users.id
 simple_query,Default,dbo.users.name
 ```
 
+**Input SQL File** (with bracketed aliases): `bracketed_aliases.sql`
+```sql
+SELECT [u].id, [u].email, [d].dept_name
+FROM [dbo].[users] [u]
+JOIN [dbo].[departments] [d] ON [u].dept_id = [d].id;
+```
+
+**Output CSV** (brackets stripped, aliases resolved):
+```csv
+ReportName,Dataset,ColumnName
+bracketed_aliases,Default,dbo.departments.dept_name
+bracketed_aliases,Default,dbo.departments.id
+bracketed_aliases,Default,dbo.users.dept_id
+bracketed_aliases,Default,dbo.users.email
+bracketed_aliases,Default,dbo.users.id
+```
+
 ## How It Works
 
 1. **Filename Parsing**: Extracts Report Name and Dataset from SQL filename
 2. **Dataset Filtering**: Skips files with excluded dataset names (SOR%, Tablix, EndDate, EvidenceTab, EvidenceTablix)
 3. **Preprocessing**: Removes comments, DDL statements, and other non-query SQL while preserving bracketed identifiers
 4. **Parsing**: Uses sqlglot to parse SQL into an Abstract Syntax Tree (AST), with regex fallback for unparseable SQL
-5. **Alias Resolution**: Builds a map of table aliases to actual table names (strips brackets for clean output)
+5. **Alias Resolution**: Builds a map of table aliases to actual table names, handling both bracketed and unbracketed aliases (e.g., `[u]` and `u` both resolve correctly)
 6. **Column Extraction**: Traverses the AST to find all column references
 7. **Qualification**: Resolves unqualified columns to their source tables with fallback to first table in FROM clause
-8. **Bracket Stripping**: Removes SQL Server brackets from identifiers for clean output (e.g., [dbo].[users] -> dbo.users)
+8. **Bracket Stripping**: Removes SQL Server brackets from all identifiers (aliases, table names, schema names, column names) for clean output (e.g., `[dbo].[users].[id]` → `dbo.users.id`)
 9. **Deduplication**: Removes duplicate columns within each file (keeps unique per file)
 10. **Sorting**: Sorts output by ReportName, Dataset, ColumnName
 11. **Output**: Writes results to CSV or Excel format with auto-formatting and filters (Excel only)
@@ -185,10 +203,11 @@ simple_query,Default,dbo.users.name
 ## Limitations
 
 - Unqualified columns in multi-table queries use fallback to first table in FROM clause if table cannot be determined from context
-- Columns with unresolvable table references (e.g., nonexistent_table.column) are skipped
+- Columns with unresolvable table references (e.g., nonexistent_table.column) are skipped, except for originally unqualified columns which are included with fallback table
 - Some SQL dialects may require explicit `--dialect` specification
 - Very large SQL files may take longer to process
 - CSV format does not support filters or auto-formatting (Excel only)
+- Fallback regex parser (used when AST parsing fails) may not handle all bracket/quote patterns as robustly as the main AST parser
 
 ## Requirements
 
