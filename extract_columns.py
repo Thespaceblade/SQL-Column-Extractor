@@ -308,11 +308,35 @@ def preprocess_sql(sql: str) -> str:
     return sql
 
 
+def strip_brackets(identifier):
+    """
+    Strip SQL Server brackets [] from an identifier.
+    
+    Args:
+        identifier: String or identifier object that may contain brackets
+        
+    Returns:
+        String with brackets removed, or original value if not a string
+    """
+    if not identifier:
+        return identifier
+    
+    identifier_str = identifier if isinstance(identifier, str) else str(identifier)
+    
+    # Remove brackets: [name] -> name
+    if identifier_str.startswith('[') and identifier_str.endswith(']'):
+        return identifier_str[1:-1]
+    
+    return identifier_str
+
+
 def build_alias_map(stmt: exp.Expression) -> dict:
     """
     Build a mapping of table aliases to actual table/CTE names.
     Returns dict mapping alias -> full_table_name or cte_name
     Handles all cases: FROM aliases, JOIN aliases, CTE aliases, subquery aliases
+    
+    Strips brackets from schema and table names to ensure clean alias mapping.
     """
     alias_map = {}
     cte_names = set()
@@ -336,15 +360,19 @@ def build_alias_map(stmt: exp.Expression) -> dict:
             if not table_name:
                 return
             
+            # Strip brackets from catalog, db, and table name before building qualified name
             parts = []
             if table_expr.catalog:
-                parts.append(table_expr.catalog)
+                catalog_clean = strip_brackets(table_expr.catalog)
+                parts.append(catalog_clean)
             if table_expr.db:
-                parts.append(table_expr.db)
+                db_clean = strip_brackets(table_expr.db)
+                parts.append(db_clean)
             if table_name:
-                parts.append(table_name)
+                table_name_clean = strip_brackets(table_name)
+                parts.append(table_name_clean)
             
-            full_table_name = ".".join(parts) if parts else table_name
+            full_table_name = ".".join(parts) if parts else table_name_clean
             alias = table_expr.alias
             alias_name = None
             if alias:
@@ -361,8 +389,9 @@ def build_alias_map(stmt: exp.Expression) -> dict:
                 else:
                     alias_name = str(alias)
             
-            if table_name in cte_names or table_name in context_cte_names:
-                resolved_name = table_name
+            # Use cleaned table name for CTE check
+            if table_name_clean in cte_names or table_name_clean in context_cte_names:
+                resolved_name = table_name_clean
             else:
                 resolved_name = full_table_name
             
@@ -370,9 +399,15 @@ def build_alias_map(stmt: exp.Expression) -> dict:
                 alias_map[alias_name] = resolved_name
                 alias_map[alias_name.lower()] = resolved_name
             
-            alias_map[table_name] = resolved_name
-            if isinstance(table_name, str):
-                alias_map[table_name.lower()] = resolved_name
+            # Store both original and cleaned table name in alias map
+            alias_map[table_name_clean] = resolved_name
+            if isinstance(table_name_clean, str):
+                alias_map[table_name_clean.lower()] = resolved_name
+            # Also store original table_name (with brackets) mapping to cleaned resolved name
+            if table_name != table_name_clean:
+                alias_map[table_name] = resolved_name
+                if isinstance(table_name, str):
+                    alias_map[table_name.lower()] = resolved_name
         
         elif isinstance(table_expr, exp.Subquery):
             alias = table_expr.alias
@@ -905,13 +940,54 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                     if enable_unqualified_resolution:
                         unqualified_map = resolve_unqualified_columns(stmt, alias_map)
                     
+                    # Helper function to get fallback table from FROM clause
+                    def get_fallback_table(select_stmt):
+                        """Get the first table from FROM clause as fallback for unresolvable unqualified columns."""
+                        from_expr = select_stmt.args.get("from") or select_stmt.args.get("from_")
+                        if from_expr:
+                            if isinstance(from_expr, exp.From):
+                                table_expr = from_expr.this
+                            else:
+                                table_expr = from_expr
+                            
+                            if isinstance(table_expr, exp.Table):
+                                parts = []
+                                if table_expr.catalog:
+                                    parts.append(strip_brackets(table_expr.catalog if isinstance(table_expr.catalog, str) else str(table_expr.catalog)))
+                                if table_expr.db:
+                                    parts.append(strip_brackets(table_expr.db if isinstance(table_expr.db, str) else str(table_expr.db)))
+                                if table_expr.name:
+                                    parts.append(strip_brackets(table_expr.name if isinstance(table_expr.name, str) else str(table_expr.name)))
+                                
+                                if parts:
+                                    # Resolve alias if present
+                                    alias = table_expr.alias
+                                    if alias:
+                                        alias_name = alias.this.name if isinstance(alias, exp.TableAlias) and isinstance(alias.this, exp.Identifier) else str(alias)
+                                        resolved = alias_map.get(alias_name) or alias_map.get(alias_name.lower()) if alias_name else None
+                                        if resolved:
+                                            return resolved
+                                    
+                                    # Check if table name is in alias map
+                                    table_name_only = parts[-1]
+                                    resolved = alias_map.get(table_name_only) or alias_map.get(table_name_only.lower())
+                                    if resolved:
+                                        return resolved
+                                    
+                                    return ".".join(parts)
+                        return None
+                    
                     # Find all column references (including WHERE, JOIN, HAVING, etc.)
                     for col in stmt.find_all(exp.Column):
                         if col.name:
+                            # Track if this column was originally unqualified (no table reference)
+                            was_unqualified = col.table is None or (isinstance(col.table, str) and not col.table.strip())
+                            
                             # Get table name (either from column or from unqualified mapping)
+                            # Strip brackets from table name
                             table_name = col.table
-                            if table_name and not isinstance(table_name, str):
-                                table_name = str(table_name)
+                            if table_name:
+                                table_name = strip_brackets(table_name if isinstance(table_name, str) else str(table_name))
                             
                             # If column is unqualified, try to resolve it (case-insensitive)
                             if not table_name:
@@ -920,10 +996,45 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                                 table_name = (unqualified_map.get(col_name) or 
                                             unqualified_map.get(col_name.lower()))
                             
-                            # Only include columns that have a table reference
+                            # If still no table name and column was originally unqualified, use fallback
+                            if not table_name and was_unqualified:
+                                # Try to get fallback table from FROM clause
+                                # Find the SELECT statement this column belongs to
+                                current_select = None
+                                for select in stmt.find_all(exp.Select):
+                                    if col in select.find_all(exp.Column):
+                                        current_select = select
+                                        break
+                                
+                                if current_select:
+                                    fallback_table = get_fallback_table(current_select)
+                                    if fallback_table:
+                                        table_name = fallback_table
+                            
+                            # Handle columns without table reference
                             if not table_name:
-                                # Skip columns without table reference
+                                # If column was originally unqualified and we couldn't resolve or find fallback, skip it
                                 continue
+                            
+                            # If column had a table reference originally, verify it can be resolved
+                            # (Skip columns with unresolvable table references, but include unqualified columns)
+                            if not was_unqualified:
+                                # Column had a table reference - check if it's resolvable
+                                table_name_str = table_name if isinstance(table_name, str) else str(table_name)
+                                resolved_table_check = (case_insensitive_alias_map.get(table_name_str.lower()) or 
+                                                       alias_map.get(table_name_str))
+                                # If table reference can't be resolved and isn't a direct table name from FROM clause,
+                                # skip it (This handles cases like nonexistent_table.column)
+                                # Note: We allow it if it's in alias_map as a key (table name) or value (resolved name)
+                                if not resolved_table_check:
+                                    # Check if it's a direct table name (might be in alias_map as a key mapping to itself)
+                                    # or if it appears as part of a resolved name
+                                    is_known_table = (table_name_str in alias_map or 
+                                                     table_name_str.lower() in case_insensitive_alias_map or
+                                                     any(table_name_str.lower() in str(v).lower() for v in alias_map.values()))
+                                    if not is_known_table:
+                                        # Table reference doesn't exist and isn't a known table - skip it
+                                        continue
                             
                             # Build fully qualified name
                             parts = []
@@ -931,7 +1042,8 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                             # Handle catalog - check if it's an alias first
                             catalog_part = None
                             if col.catalog:
-                                catalog_str = col.catalog if isinstance(col.catalog, str) else str(col.catalog)
+                                # Strip brackets from catalog before processing
+                                catalog_str = strip_brackets(col.catalog if isinstance(col.catalog, str) else str(col.catalog))
                                 # Check if catalog is actually an alias
                                 resolved_catalog = (case_insensitive_alias_map.get(catalog_str.lower()) or 
                                                    alias_map.get(catalog_str))
@@ -949,7 +1061,8 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                             db_part = None
                             db_resolved_to_table = False
                             if col.db:
-                                db_str = col.db if isinstance(col.db, str) else str(col.db)
+                                # Strip brackets from db before processing
+                                db_str = strip_brackets(col.db if isinstance(col.db, str) else str(col.db))
                                 # Check if db is actually an alias
                                 resolved_db = (case_insensitive_alias_map.get(db_str.lower()) or 
                                               alias_map.get(db_str))
