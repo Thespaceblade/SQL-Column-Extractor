@@ -191,8 +191,8 @@ def decode_html_entities(sql: str) -> str:
         except Exception:
             break
     
-    # Handle plus signs as spaces in URL encoding context
-    sql = sql.replace('+', ' ')
+    # NOTE: Do NOT replace '+' signs globally - they are valid SQL operators
+    # URL-encoded plus signs (%2B) are already handled by urllib.parse.unquote above
     
     html_entity_map = {
         '&gt;': '>',
@@ -440,11 +440,6 @@ def build_alias_map(stmt: exp.Expression) -> dict:
             if alias_name:
                 # Strip brackets from alias name before storing (to match how we look it up later)
                 alias_name_clean = strip_brackets(alias_name)
-                # #region agent log
-                with open('/Users/jasoncharwin/Personal Code Projects/SQL-Parser/.cursor/debug.log', 'a') as f:
-                    import json
-                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"extract_columns.py:443","message":"Storing alias in alias_map","data":{"alias_name_original":str(alias_name),"alias_name_clean":alias_name_clean,"resolved_name":resolved_name},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-                # #endregion
                 alias_map[alias_name_clean] = resolved_name
                 alias_map[alias_name_clean.lower()] = resolved_name
                 # Also store original alias (with brackets) for lookup compatibility
@@ -463,7 +458,8 @@ def build_alias_map(stmt: exp.Expression) -> dict:
                 if isinstance(table_name, str):
                     alias_map[table_name.lower()] = resolved_name
         
-        elif isinstance(table_expr, exp.Subquery):
+        elif isinstance(table_expr, (exp.Subquery, exp.Lateral)):
+            # Handle subqueries, derived tables, CROSS APPLY, OUTER APPLY
             alias = table_expr.alias
             if alias:
                 if isinstance(alias, exp.TableAlias):
@@ -478,6 +474,12 @@ def build_alias_map(stmt: exp.Expression) -> dict:
                     alias_name = alias
                 else:
                     alias_name = str(alias)
+                
+                # Store the derived table/subquery alias (maps to itself since it's a derived table)
+                if alias_name:
+                    alias_name_clean = strip_brackets(alias_name)
+                    alias_map[alias_name_clean] = alias_name_clean
+                    alias_map[alias_name_clean.lower()] = alias_name_clean
     
     def extract_from_joins(expression, context_cte_names=None):
         """Recursively extract table aliases from FROM and JOIN clauses."""
@@ -1046,14 +1048,8 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                             # Get table name (either from column or from unqualified mapping)
                             # Strip brackets from table name
                             table_name = col.table
-                            table_name_original = str(table_name) if table_name else None
                             if table_name:
                                 table_name = strip_brackets(table_name if isinstance(table_name, str) else str(table_name))
-                                # #region agent log
-                                with open('/Users/jasoncharwin/Personal Code Projects/SQL-Parser/.cursor/debug.log', 'a') as f:
-                                    import json
-                                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"extract_columns.py:1045","message":"Extracted col.table","data":{"table_name_original":table_name_original,"table_name_stripped":table_name,"col_name":str(col.name) if col.name else None,"col_type":str(type(col.table))},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-                                # #endregion
                             
                             # If column is unqualified, try to resolve it (case-insensitive)
                             if not table_name:
@@ -1172,19 +1168,9 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                             if db_resolved_to_table and table_name_str:
                                 # db already contains the table name, skip col.table
                                 resolved_table = None
-                                # #region agent log
-                                with open('/Users/jasoncharwin/Personal Code Projects/SQL-Parser/.cursor/debug.log', 'a') as f:
-                                    import json
-                                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"extract_columns.py:1163","message":"db_resolved_to_table=True, skipping table resolution","data":{"table_name_str":table_name_str,"db_resolved_to_table":True},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-                                # #endregion
                             else:
                                 resolved_table = (case_insensitive_alias_map.get(table_name_str.lower()) or 
                                                  alias_map.get(table_name_str))
-                                # #region agent log
-                                with open('/Users/jasoncharwin/Personal Code Projects/SQL-Parser/.cursor/debug.log', 'a') as f:
-                                    import json
-                                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"extract_columns.py:1166","message":"Alias lookup result","data":{"table_name_str":table_name_str,"resolved_table":resolved_table,"lookup_keys_tried":[table_name_str.lower(),table_name_str],"alias_map_has_key":table_name_str in alias_map,"case_insensitive_has_key":table_name_str.lower() in case_insensitive_alias_map},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-                                # #endregion
                             
                             if resolved_table:
                                 # Replace alias with actual table name
@@ -1232,33 +1218,17 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                                 if not db_resolved_to_table:
                                     # If column was already qualified, include it (this handles cases like
                                     # SELECT users.id FROM dbo.users where "users" isn't in alias_map)
-                                    # #region agent log
-                                    with open('/Users/jasoncharwin/Personal Code Projects/SQL-Parser/.cursor/debug.log', 'a') as f:
-                                        import json
-                                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"extract_columns.py:1214","message":"Using unresolved table_name_str (might be alias)","data":{"table_name_str":table_name_str,"resolved_table":None,"db_resolved_to_table":db_resolved_to_table,"parts_so_far":parts},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-                                    # #endregion
                                     parts.append(table_name_str)
                             
                             # Add column name
                             col_name = col.name if isinstance(col.name, str) else str(col.name)
-                            col_name_original = col_name
                             col_name = strip_brackets(col_name)
-                            # #region agent log
-                            with open('/Users/jasoncharwin/Personal Code Projects/SQL-Parser/.cursor/debug.log', 'a') as f:
-                                import json
-                                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"extract_columns.py:1218","message":"Column name processing","data":{"col_name_original":col_name_original,"col_name_stripped":col_name},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-                            # #endregion
                             parts.append(col_name)
                             
                             # Join with dots: schema.table.column or table.column
                             # Must have at least table.column (2 parts minimum)
                             if len(parts) >= 2:
                                 qualified_name = ".".join(parts)
-                                # #region agent log
-                                with open('/Users/jasoncharwin/Personal Code Projects/SQL-Parser/.cursor/debug.log', 'a') as f:
-                                    import json
-                                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"extract_columns.py:1224","message":"Final qualified name before output","data":{"qualified_name":qualified_name,"parts":parts,"resolved_table":resolved_table if 'resolved_table' in locals() else None},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-                                # #endregion
                                 # Filter out wildcard columns (table.*)
                                 if qualified_name.endswith('.*'):
                                     continue

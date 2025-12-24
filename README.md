@@ -12,11 +12,15 @@ Extract table.column references from SQL files and output to CSV/Excel format. P
 - Output sorted by ReportName, Dataset, ColumnName
 - Excel output with auto-formatted column widths and filters
 - Supports complex SQL features:
-  - CTEs (Common Table Expressions)
+  - CTEs (Common Table Expressions), including recursive CTEs
   - Subqueries and derived tables
   - JOINs (INNER, LEFT, RIGHT, FULL OUTER)
-  - Window functions
+  - CROSS APPLY / OUTER APPLY (SQL Server lateral joins)
+  - Window functions with PARTITION BY and ORDER BY
+  - PIVOT and UNPIVOT operations
+  - Correlated subqueries
   - WHERE, HAVING, and JOIN conditions
+  - UNION, INTERSECT, EXCEPT operations
 - Case-insensitive alias resolution
 - Handles bracketed aliases correctly (e.g., `SELECT [u].id FROM users [u]` resolves to `users.id`)
 - Strips brackets from identifiers for clean output (e.g., `[dbo].[users].[id]` → `dbo.users.id`)
