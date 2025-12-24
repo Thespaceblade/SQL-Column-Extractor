@@ -120,43 +120,6 @@ def parse_filename(filepath: Path) -> tuple[str, str]:
     return report_name, dataset
 
 
-def should_skip_dataset(dataset: str) -> bool:
-    """
-    Check if a dataset should be skipped based on name patterns.
-    
-    Skips datasets containing:
-    - SOR% (e.g., SOR_DATA, SOR_REFRESH, SORDATA, etc.)
-    - Tablix
-    - EndDate
-    - EvidenceTab
-    
-    Args:
-        dataset: Dataset name to check
-        
-    Returns:
-        bool: True if dataset should be skipped
-    """
-    dataset_upper = dataset.upper()
-    
-    # Check for SOR% pattern (case-insensitive)
-    if 'SOR' in dataset_upper:
-        return True
-    
-    # Check for Tablix (case-insensitive)
-    if 'TABLIX' in dataset_upper:
-        return True
-    
-    # Check for EndDate (case-insensitive)
-    if 'ENDDATE' in dataset_upper:
-        return True
-    
-    # Check for EvidenceTab (case-insensitive)
-    if 'EVIDENCETAB' in dataset_upper:
-        return True
-    
-    return False
-
-
 def decode_html_entities(sql: str) -> str:
     """
     Convert HTML encoded characters to their actual symbols.
@@ -637,9 +600,10 @@ def format_parse_error(error: Exception, sql: str, dialect: Optional[str] = None
             # Use the first error's description (most relevant)
             first_error = error.errors[0]
             error_description = first_error.get('description', str(error))
-            # Clean ANSI codes from error description (only sequences with ESC/CSI)
+            # Clean ANSI codes from error description
             error_description = re.sub(r'\x1b\[[0-9;]*m', '', error_description)
             error_description = re.sub(r'\033\[[0-9;]*m', '', error_description)
+            error_description = re.sub(r'\[[0-9;]*m', '', error_description)
             error_msg.append(f"Error: {error_description}")
             
             # Extract line and column from error structure
@@ -653,9 +617,10 @@ def format_parse_error(error: Exception, sql: str, dialect: Optional[str] = None
         else:
             # Fallback to string representation
             error_str = str(error)
-            # Remove ANSI codes from error message (only sequences with ESC/CSI)
+            # Remove ANSI codes from error message if present
             error_str = re.sub(r'\x1b\[[0-9;]*m', '', error_str)
             error_str = re.sub(r'\033\[[0-9;]*m', '', error_str)
+            error_str = re.sub(r'\[[0-9;]*m', '', error_str)
             error_msg.append(f"Error: {error_str}")
             
             # Try to find line number in error message
@@ -669,9 +634,10 @@ def format_parse_error(error: Exception, sql: str, dialect: Optional[str] = None
     else:
         # For non-ParseError exceptions
         error_str = str(error)
-        # Remove ANSI codes from error message (only sequences with ESC/CSI)
+        # Remove ANSI codes from error message if present
         error_str = re.sub(r'\x1b\[[0-9;]*m', '', error_str)
         error_str = re.sub(r'\033\[[0-9;]*m', '', error_str)
+        error_str = re.sub(r'\[[0-9;]*m', '', error_str)
         error_msg.append(f"Error: {error_str}")
         
         # Try to find line number in error message
@@ -764,13 +730,6 @@ def fallback_extract_columns(sql: str, enable_unqualified_resolution: bool = Tru
     Fallback tolerant parser using sqlparse tokenizer + regex extraction.
     Used when AST parsing fails or yields zero columns.
     
-    Handles bracket/quote/backtick-aware identifiers:
-    - [schema].[table].[column] - SQL Server bracketed
-    - "schema"."table"."column" - double-quoted (ANSI)
-    - `schema`.`table`.`column` - backtick (MySQL)
-    - schema.table.column - unquoted
-    - Mixed combinations
-    
     Args:
         sql: SQL string to parse
         enable_unqualified_resolution: Whether to infer table names for unqualified columns
@@ -778,155 +737,63 @@ def fallback_extract_columns(sql: str, enable_unqualified_resolution: bool = Tru
     Returns:
         List of table.column references found via regex
     """
+    if not SQLPARSE_AVAILABLE:
+        return []
+    
     columns = []
     
     try:
-        # Work with original case - do NOT uppercase as it breaks bracketed/quoted names
-        sql_text = sql
+        # Tokenize SQL using sqlparse (tolerant, doesn't require valid SQL)
+        parsed = sqlparse.parse(sql)
         
-        # Strip NOLOCK and other hints first so they don't disrupt token scanning
-        sql_text = re.sub(r'(?i)\s+WITH\s*\(\s*(NOLOCK|READPAST|READUNCOMMITTED|READCOMMITTED|REPEATABLEREAD|SERIALIZABLE|UPDLOCK|XLOCK|ROWLOCK|PAGLOCK|TABLOCK|TABLOCKX|FASTFIRSTROW|FORCESEEK|FORCESCAN|NOWAIT|READCOMMITTEDLOCK|READPASTLOCK)\s*\)', '', sql_text)
-        sql_text = re.sub(r'(?i)\(\s*NOLOCK\s*\)', '', sql_text)
-        sql_text = re.sub(r'(?i)\s+\(NOLOCK\)', '', sql_text)
+        if not parsed:
+            return []
         
-        # Robust pattern for identifier (bracket/quote/backtick/unquoted)
-        # Each identifier type captured in named groups
-        ident_pattern = r'''
-            \[(?P<{prefix}_b>[^\]]+)\]              |  # [bracketed]
-            "(?P<{prefix}_q>[^"]+)"                 |  # "double-quoted"
-            `(?P<{prefix}_bt>[^`]+)`                |  # `backtick`
-            (?P<{prefix}_u>[A-Za-z_][A-Za-z0-9_$#]*)   # unquoted
-        '''
+        sql_text = sql.upper()
         
-        # Build the full table.column pattern (with optional schema prefix)
-        # Matches: table.column, schema.table.column, [table].[column], "table"."column", etc.
-        column_pattern = re.compile(r'''
-            (?:
-                ''' + ident_pattern.format(prefix='table') + r'''
-            )
-            \s*\.\s*
-            (?:
-                ''' + ident_pattern.format(prefix='col') + r'''
-            )
-        ''', re.VERBOSE | re.IGNORECASE)
+        # Extract table aliases using regex patterns
+        # Pattern: FROM table [AS] alias or JOIN table [AS] alias
+        alias_patterns = [
+            r'(?:FROM|JOIN)\s+(\w+)(?:\s+(?:AS\s+)?(\w+))?',
+            r'(\w+)\s+(?:AS\s+)?(\w+)\s+(?:JOIN|,|WHERE)',
+        ]
         
-        # Also match 3-part names: schema.table.column
-        three_part_pattern = re.compile(r'''
-            (?:
-                ''' + ident_pattern.format(prefix='schema') + r'''
-            )
-            \s*\.\s*
-            (?:
-                ''' + ident_pattern.format(prefix='table') + r'''
-            )
-            \s*\.\s*
-            (?:
-                ''' + ident_pattern.format(prefix='col') + r'''
-            )
-        ''', re.VERBOSE | re.IGNORECASE)
+        alias_map = {}
+        for pattern in alias_patterns:
+            for match in re.finditer(pattern, sql_text, re.IGNORECASE):
+                table = match.group(1)
+                alias = match.group(2) if match.lastindex >= 2 and match.group(2) else None
+                if alias and alias.upper() not in ['AS', 'ON', 'WHERE', 'AND', 'OR']:
+                    alias_map[alias.upper()] = table.upper()
+                # Also map table to itself
+                alias_map[table.upper()] = table.upper()
         
-        def extract_named_group(match, prefixes):
-            """Extract the value from whichever named group matched."""
-            for prefix in prefixes:
-                for suffix in ['_b', '_q', '_bt', '_u']:
-                    key = prefix + suffix
-                    try:
-                        val = match.group(key)
-                        if val is not None:
-                            return val
-                    except IndexError:
-                        continue
-            return None
+        # Extract table.column patterns using regex
+        # Pattern: table.column or alias.column
+        column_pattern = r'\b(\w+)\.(\w+)\b'
         
-        # Extract 3-part names first (schema.table.column)
-        seen = set()
-        for match in three_part_pattern.finditer(sql_text):
-            schema = extract_named_group(match, ['schema'])
-            table = extract_named_group(match, ['table'])
-            col = extract_named_group(match, ['col'])
+        for match in re.finditer(column_pattern, sql_text):
+            table_ref = match.group(1).upper()
+            col_name = match.group(2).upper()
             
-            if table and col and col != '*':
-                if schema:
-                    qualified_name = f"{schema}.{table}.{col}"
-                else:
-                    qualified_name = f"{table}.{col}"
-                columns.append(qualified_name)
-                # Track position to avoid double-matching
-                seen.add((match.start(), match.end()))
-        
-        # Extract 2-part names (table.column) that weren't part of 3-part matches
-        for match in column_pattern.finditer(sql_text):
-            # Skip if this overlaps with a 3-part match
-            overlaps = False
-            for start, end in seen:
-                if start <= match.start() < end or start < match.end() <= end:
-                    overlaps = True
-                    break
-            if overlaps:
+            # Skip if it's a function call (e.g., COUNT(*), MAX(col))
+            if col_name == '*':
                 continue
             
-            table = extract_named_group(match, ['table'])
-            col = extract_named_group(match, ['col'])
+            # Resolve alias to table name
+            actual_table = alias_map.get(table_ref, table_ref)
             
-            if table and col and col != '*':
-                qualified_name = f"{table}.{col}"
-                columns.append(qualified_name)
+            # Build qualified name
+            qualified_name = f"{actual_table}.{col_name}"
+            columns.append(qualified_name)
         
-        # Build alias map for resolving aliases (bracket/quote-aware)
-        alias_map = {}
-        
-        # Pattern for: FROM/JOIN [table] [AS] alias or FROM/JOIN table alias
-        table_alias_pattern = re.compile(r'''
-            (?:FROM|JOIN)\s+
-            (?:
-                \[(?P<table_b>[^\]]+)\]   |
-                "(?P<table_q>[^"]+)"       |
-                `(?P<table_bt>[^`]+)`      |
-                (?P<table_u>[A-Za-z_][A-Za-z0-9_$#.]*)
-            )
-            (?:\s+(?:AS\s+)?
-                (?:
-                    \[(?P<alias_b>[^\]]+)\]   |
-                    "(?P<alias_q>[^"]+)"       |
-                    `(?P<alias_bt>[^`]+)`      |
-                    (?P<alias_u>[A-Za-z_][A-Za-z0-9_$#]*)
-                )
-            )?
-        ''', re.VERBOSE | re.IGNORECASE)
-        
-        for match in table_alias_pattern.finditer(sql_text):
-            table = extract_named_group(match, ['table'])
-            alias = extract_named_group(match, ['alias'])
-            
-            if table:
-                # Skip SQL keywords that might be captured as aliases
-                keywords = {'AS', 'ON', 'WHERE', 'AND', 'OR', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'CROSS', 'FULL'}
-                if alias and alias.upper() not in keywords:
-                    alias_map[alias] = table
-                    alias_map[alias.lower()] = table
-                    alias_map[alias.upper()] = table
-                alias_map[table] = table
-                alias_map[table.lower()] = table
-                alias_map[table.upper()] = table
-        
-        # Resolve aliases in the extracted columns
-        resolved_columns = []
-        for col_ref in columns:
-            parts = col_ref.split('.')
-            if len(parts) >= 2:
-                table_part = parts[-2]
-                col_part = parts[-1]
-                # Try to resolve alias
-                resolved_table = alias_map.get(table_part) or alias_map.get(table_part.lower()) or alias_map.get(table_part.upper()) or table_part
-                if len(parts) == 3:
-                    schema_part = parts[0]
-                    resolved_columns.append(f"{schema_part}.{resolved_table}.{col_part}")
-                else:
-                    resolved_columns.append(f"{resolved_table}.{col_part}")
-            else:
-                resolved_columns.append(col_ref)
-        
-        return resolved_columns
+        # If unqualified resolution is enabled, try to infer table names
+        if enable_unqualified_resolution and columns:
+            # Find unqualified columns that appear after FROM/JOIN
+            # This is a simple heuristic - find column names that aren't table.column
+            unqualified_pattern = r'\b(?<!\.)(\w+)(?!\.)\b'
+            # This is simplified - in practice, you'd want more context
+            pass
         
     except Exception:
         # If fallback also fails, return empty list
@@ -1046,9 +913,6 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                             if table_name and not isinstance(table_name, str):
                                 table_name = str(table_name)
                             
-                            # Track if this column was already qualified (has table reference)
-                            is_qualified_column = bool(table_name)
-                            
                             # If column is unqualified, try to resolve it (case-insensitive)
                             if not table_name:
                                 col_name = col.name if isinstance(col.name, str) else str(col.name)
@@ -1057,7 +921,6 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                                             unqualified_map.get(col_name.lower()))
                             
                             # Only include columns that have a table reference
-                            # BUT: if column was already qualified (has table_name), include it even if not resolved
                             if not table_name:
                                 # Skip columns without table reference
                                 continue
@@ -1065,21 +928,74 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                             # Build fully qualified name
                             parts = []
                             
-                            # Add catalog if present
+                            # Handle catalog - check if it's an alias first
+                            catalog_part = None
                             if col.catalog:
-                                parts.append(col.catalog if isinstance(col.catalog, str) else str(col.catalog))
+                                catalog_str = col.catalog if isinstance(col.catalog, str) else str(col.catalog)
+                                # Check if catalog is actually an alias
+                                resolved_catalog = (case_insensitive_alias_map.get(catalog_str.lower()) or 
+                                                   alias_map.get(catalog_str))
+                                if resolved_catalog:
+                                    # It's an alias - resolve it (might be multi-part)
+                                    catalog_parts = resolved_catalog.split('.')
+                                    parts.extend(catalog_parts)
+                                    catalog_part = catalog_parts[0] if catalog_parts else None
+                                else:
+                                    # Not an alias, use as-is
+                                    parts.append(catalog_str)
+                                    catalog_part = catalog_str
                             
-                            # Track if we already have schema info from col.db
-                            has_schema_from_col = bool(col.db)
-                            
-                            # Add database/schema if present
+                            # Handle database/schema - check if it's an alias first
+                            db_part = None
+                            db_resolved_to_table = False
                             if col.db:
-                                parts.append(col.db if isinstance(col.db, str) else str(col.db))
+                                db_str = col.db if isinstance(col.db, str) else str(col.db)
+                                # Check if db is actually an alias
+                                resolved_db = (case_insensitive_alias_map.get(db_str.lower()) or 
+                                              alias_map.get(db_str))
+                                if resolved_db:
+                                    # It's an alias - resolve it
+                                    db_parts = resolved_db.split('.')
+                                    # If resolved_db contains multiple parts, it's a full table name
+                                    # In this case, col.table might be redundant or incorrect
+                                    if len(db_parts) > 1:
+                                        db_resolved_to_table = True
+                                        # If we already have catalog, check for duplication
+                                        if catalog_part and len(db_parts) > 0:
+                                            if db_parts[0].lower() == catalog_part.lower():
+                                                # Skip catalog part if it matches
+                                                parts.extend(db_parts[1:] if len(db_parts) > 1 else [])
+                                            else:
+                                                parts.extend(db_parts)
+                                        else:
+                                            parts.extend(db_parts)
+                                        db_part = db_parts[-1] if db_parts else None
+                                    else:
+                                        # Single part, treat as schema
+                                        if catalog_part and len(db_parts) > 0:
+                                            if db_parts[0].lower() == catalog_part.lower():
+                                                parts.extend(db_parts[1:] if len(db_parts) > 1 else [])
+                                            else:
+                                                parts.extend(db_parts)
+                                        else:
+                                            parts.extend(db_parts)
+                                        db_part = db_parts[-1] if db_parts else None
+                                else:
+                                    # Not an alias, use as-is
+                                    parts.append(db_str)
+                                    db_part = db_str
                             
                             # Resolve table alias to actual table name (case-insensitive)
+                            # BUT: if db resolved to a full table name, col.table might be redundant
                             table_name_str = table_name if isinstance(table_name, str) else str(table_name)
-                            resolved_table = (case_insensitive_alias_map.get(table_name_str.lower()) or 
-                                             alias_map.get(table_name_str))
+                            
+                            # If db resolved to a table name, check if table_name matches the last part
+                            if db_resolved_to_table and table_name_str:
+                                # db already contains the table name, skip col.table
+                                resolved_table = None
+                            else:
+                                resolved_table = (case_insensitive_alias_map.get(table_name_str.lower()) or 
+                                                 alias_map.get(table_name_str))
                             
                             if resolved_table:
                                 # Replace alias with actual table name
@@ -1087,24 +1003,47 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                                 # Split the actual table name and use its parts
                                 table_parts = actual_table.split('.')
                                 
-                                # If col.db was already added, avoid duplicating schema
-                                # Check if first part of resolved table matches col.db
-                                if has_schema_from_col and len(table_parts) > 1:
-                                    # Skip the schema part if it matches col.db
-                                    if table_parts[0].lower() == (col.db if isinstance(col.db, str) else str(col.db)).lower():
-                                        # Use only table name, schema already in parts
-                                        parts.extend(table_parts[1:])
+                                # Avoid duplicating catalog/schema if already in parts
+                                if len(parts) > 0:
+                                    # Check if resolved table starts with what we already have
+                                    # Compare prefix of resolved table with what's in parts
+                                    if len(table_parts) >= len(parts):
+                                        # Check if prefix matches
+                                        prefix_matches = True
+                                        for i, part in enumerate(parts):
+                                            if i < len(table_parts) and table_parts[i].lower() != part.lower():
+                                                prefix_matches = False
+                                                break
+                                        
+                                        if prefix_matches:
+                                            # Prefix matches, only add the remaining parts
+                                            parts.extend(table_parts[len(parts):])
+                                        else:
+                                            # Prefix doesn't match, check if just schema matches
+                                            if db_part and len(table_parts) > 1:
+                                                if table_parts[0].lower() == db_part.lower():
+                                                    # Schema matches, skip it
+                                                    parts.extend(table_parts[1:])
+                                                else:
+                                                    # Different, add all
+                                                    parts.extend(table_parts)
+                                            else:
+                                                # No db_part to compare, add all
+                                                parts.extend(table_parts)
                                     else:
-                                        # Different schema, include all parts
+                                        # Resolved table is shorter, add all parts
                                         parts.extend(table_parts)
                                 else:
-                                    # No schema in col.db, include all parts from resolved table
+                                    # No parts yet, include all parts from resolved table
                                     parts.extend(table_parts)
                             else:
                                 # Table name not in alias map - use as-is
-                                # If column was already qualified, include it (this handles cases like
-                                # SELECT users.id FROM dbo.users where "users" isn't in alias_map)
-                                parts.append(table_name_str)
+                                # BUT: if db already resolved to a table name, don't add table_name_str
+                                # (it's already included in the resolved db)
+                                if not db_resolved_to_table:
+                                    # If column was already qualified, include it (this handles cases like
+                                    # SELECT users.id FROM dbo.users where "users" isn't in alias_map)
+                                    parts.append(table_name_str)
                             
                             # Add column name
                             col_name = col.name if isinstance(col.name, str) else str(col.name)
@@ -1165,10 +1104,11 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
             # Store error for this dialect attempt
             if error_details is not None:
                 formatted_error = format_parse_error(e, sql, try_dialect)
-                # Clean ANSI codes from error string (only sequences with ESC/CSI)
+                # Clean ANSI codes from error string
                 error_str = str(e)
                 error_str = re.sub(r'\x1b\[[0-9;]*m', '', error_str)
                 error_str = re.sub(r'\033\[[0-9;]*m', '', error_str)
+                error_str = re.sub(r'\[[0-9;]*m', '', error_str)
                 error_details.append({
                     'statement': 'all',
                     'dialect': try_dialect or 'tsql',
@@ -1187,10 +1127,11 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
             # Store error for this dialect attempt
             if error_details is not None:
                 formatted_error = format_parse_error(e, sql, try_dialect)
-                # Clean ANSI codes from error string (only sequences with ESC/CSI)
+                # Clean ANSI codes from error string
                 error_str = str(e)
                 error_str = re.sub(r'\x1b\[[0-9;]*m', '', error_str)
                 error_str = re.sub(r'\033\[[0-9;]*m', '', error_str)
+                error_str = re.sub(r'\[[0-9;]*m', '', error_str)
                 error_details.append({
                     'statement': 'all',
                     'dialect': try_dialect or 'tsql',
@@ -1501,12 +1442,6 @@ def main():
             # Parse filename to get report name and dataset
             report_name, dataset = parse_filename(sql_file)
             logger.info(f"  Parsed: Report='{report_name}', Dataset='{dataset}'")
-            
-            # Skip files with excluded dataset names
-            if should_skip_dataset(dataset):
-                logger.info(f"  Skipping file (dataset '{dataset}' matches exclusion pattern)")
-                print(f"  Skipping: {sql_file.name} (dataset '{dataset}' matches exclusion pattern)")
-                continue
             
             # Store full relative path or just filename for file_columns tracking
             file_key = str(sql_file.relative_to(Path.cwd())) if sql_file.is_relative_to(Path.cwd()) else str(sql_file)
