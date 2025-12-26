@@ -504,6 +504,315 @@ def strip_brackets(identifier):
     return identifier_str
 
 
+def build_scope_alias_maps_for_dml(stmt: exp.Expression) -> tuple[dict, set]:
+    """
+    Build alias maps for DML statements (UPDATE, INSERT, MERGE).
+    Returns scope_maps and cte_names similar to build_scope_alias_maps.
+    """
+    scope_maps = {}
+    cte_names = set()
+    alias_map = {}
+    
+    # Collect CTE names
+    for cte in stmt.find_all(exp.CTE):
+        if cte.alias:
+            cte_name = cte.alias if isinstance(cte.alias, str) else cte.alias.name if hasattr(cte.alias, 'name') else str(cte.alias)
+            if cte_name:
+                cte_names.add(strip_brackets(cte_name) if isinstance(cte_name, str) else cte_name)
+    
+    def extract_table_alias_for_scope(table_expr, local_alias_map, context_cte_names=None):
+        """Extract table name and alias from a table expression into local scope map."""
+        if context_cte_names is None:
+            context_cte_names = set()
+        
+        if isinstance(table_expr, exp.Table):
+            table_name = table_expr.name
+            if not table_name:
+                return
+            
+            parts = []
+            if table_expr.catalog:
+                catalog_clean = strip_brackets(table_expr.catalog)
+                parts.append(catalog_clean)
+            if table_expr.db:
+                db_clean = strip_brackets(table_expr.db)
+                parts.append(db_clean)
+            if table_name:
+                table_name_clean = strip_brackets(table_name)
+                parts.append(table_name_clean)
+            
+            full_table_name = ".".join(parts) if parts else table_name_clean
+            alias = table_expr.alias
+            alias_name = None
+            if alias:
+                if isinstance(alias, exp.TableAlias):
+                    alias_this = alias.this
+                    if isinstance(alias_this, exp.Identifier):
+                        alias_name = alias_this.name
+                    elif isinstance(alias_this, str):
+                        alias_name = alias_this
+                    else:
+                        alias_name = str(alias_this)
+                elif isinstance(alias, str):
+                    alias_name = alias
+                else:
+                    alias_name = str(alias)
+            
+            if table_name_clean in cte_names or table_name_clean in context_cte_names:
+                resolved_name = table_name_clean
+            else:
+                resolved_name = full_table_name
+            
+            if alias_name:
+                alias_name_clean = strip_brackets(alias_name)
+                local_alias_map[alias_name_clean] = resolved_name
+                local_alias_map[alias_name_clean.lower()] = resolved_name
+            
+            local_alias_map[table_name_clean] = resolved_name
+            if isinstance(table_name_clean, str):
+                local_alias_map[table_name_clean.lower()] = resolved_name
+    
+    # Handle UPDATE statements
+    if isinstance(stmt, exp.Update):
+        local_map = {}
+        # Get the table being updated
+        if stmt.this:
+            if isinstance(stmt.this, exp.Table):
+                extract_table_alias_for_scope(stmt.this, local_map, cte_names)
+            elif hasattr(stmt.this, 'this') and isinstance(stmt.this.this, exp.Table):
+                extract_table_alias_for_scope(stmt.this.this, local_map, cte_names)
+        
+        # Get tables from FROM clause (SQL Server UPDATE ... FROM syntax)
+        from_expr = stmt.args.get("from") or stmt.args.get("from_")
+        if from_expr:
+            if isinstance(from_expr, exp.From):
+                extract_table_alias_for_scope(from_expr.this, local_map, cte_names)
+            elif isinstance(from_expr, exp.Table):
+                extract_table_alias_for_scope(from_expr, local_map, cte_names)
+        
+        # Get tables from JOINs
+        for join in stmt.args.get("joins", []):
+            if isinstance(join, exp.Join):
+                extract_table_alias_for_scope(join.this, local_map, cte_names)
+        
+        scope_maps[id(stmt)] = local_map
+    
+    # Handle INSERT statements
+    elif isinstance(stmt, exp.Insert):
+        local_map = {}
+        # INSERT INTO table - get the target table
+        if stmt.this:
+            if isinstance(stmt.this, exp.Table):
+                extract_table_alias_for_scope(stmt.this, local_map, cte_names)
+        
+        # INSERT ... SELECT - process the SELECT part
+        if hasattr(stmt, 'expression') and isinstance(stmt.expression, exp.Select):
+            # Recursively build maps for the SELECT
+            select_maps, select_cte_names = build_scope_alias_maps(stmt.expression)
+            scope_maps.update(select_maps)
+            cte_names.update(select_cte_names)
+    
+    # Handle DELETE statements
+    elif isinstance(stmt, exp.Delete):
+        local_map = {}
+        # Get the table being deleted from
+        if stmt.this:
+            if isinstance(stmt.this, exp.Table):
+                extract_table_alias_for_scope(stmt.this, local_map, cte_names)
+            elif hasattr(stmt.this, 'this') and isinstance(stmt.this.this, exp.Table):
+                extract_table_alias_for_scope(stmt.this.this, local_map, cte_names)
+        
+        # Get tables from FROM clause (SQL Server DELETE ... FROM syntax)
+        from_expr = stmt.args.get("from") or stmt.args.get("from_")
+        if from_expr:
+            if isinstance(from_expr, exp.From):
+                extract_table_alias_for_scope(from_expr.this, local_map, cte_names)
+            elif isinstance(from_expr, exp.Table):
+                extract_table_alias_for_scope(from_expr, local_map, cte_names)
+        
+        # Get tables from JOINs
+        for join in stmt.args.get("joins", []):
+            if isinstance(join, exp.Join):
+                extract_table_alias_for_scope(join.this, local_map, cte_names)
+        
+        scope_maps[id(stmt)] = local_map
+    
+    # Handle MERGE statements
+    elif isinstance(stmt, exp.Merge):
+        local_map = {}
+        # Target table
+        if stmt.this:
+            if isinstance(stmt.this, exp.Table):
+                extract_table_alias_for_scope(stmt.this, local_map, cte_names)
+            elif hasattr(stmt.this, 'this') and isinstance(stmt.this.this, exp.Table):
+                extract_table_alias_for_scope(stmt.this.this, local_map, cte_names)
+        
+        # USING clause (source)
+        using_expr = stmt.args.get("using")
+        if using_expr:
+            if isinstance(using_expr, exp.Table):
+                extract_table_alias_for_scope(using_expr, local_map, cte_names)
+            elif isinstance(using_expr, exp.Subquery):
+                # Process subquery in USING
+                select_maps, select_cte_names = build_scope_alias_maps(using_expr.this)
+                scope_maps.update(select_maps)
+                cte_names.update(select_cte_names)
+                # Add alias if present
+                if using_expr.alias:
+                    alias_name = using_expr.alias.name if hasattr(using_expr.alias, 'name') else str(using_expr.alias)
+                    if alias_name:
+                        alias_name_clean = strip_brackets(alias_name)
+                        local_map[alias_name_clean] = alias_name_clean
+                        local_map[alias_name_clean.lower()] = alias_name_clean
+        
+        scope_maps[id(stmt)] = local_map
+    
+    return scope_maps, cte_names
+
+
+def build_alias_map_for_dml(stmt: exp.Expression) -> dict:
+    """
+    Build a flat alias map for DML statements (UPDATE, INSERT, MERGE).
+    Similar to build_alias_map but handles DML-specific syntax.
+    """
+    alias_map = {}
+    cte_names = set()
+    
+    # Collect CTE names
+    for cte in stmt.find_all(exp.CTE):
+        if cte.alias:
+            cte_name = cte.alias if isinstance(cte.alias, str) else cte.alias.name if hasattr(cte.alias, 'name') else str(cte.alias)
+            if cte_name:
+                cte_names.add(strip_brackets(cte_name) if isinstance(cte_name, str) else cte_name)
+                alias_map[cte_name] = cte_name
+                if isinstance(cte_name, str):
+                    alias_map[cte_name.lower()] = cte_name
+    
+    def extract_table_alias(table_expr, alias_map, cte_names):
+        """Extract table name and alias from a table expression."""
+        if isinstance(table_expr, exp.Table):
+            table_name = table_expr.name
+            if not table_name:
+                return
+            
+            parts = []
+            if table_expr.catalog:
+                catalog_clean = strip_brackets(table_expr.catalog)
+                parts.append(catalog_clean)
+            if table_expr.db:
+                db_clean = strip_brackets(table_expr.db)
+                parts.append(db_clean)
+            if table_name:
+                table_name_clean = strip_brackets(table_name)
+                parts.append(table_name_clean)
+            
+            full_table_name = ".".join(parts) if parts else table_name_clean
+            alias = table_expr.alias
+            alias_name = None
+            if alias:
+                if isinstance(alias, exp.TableAlias):
+                    alias_this = alias.this
+                    if isinstance(alias_this, exp.Identifier):
+                        alias_name = alias_this.name
+                    elif isinstance(alias_this, str):
+                        alias_name = alias_this
+                    else:
+                        alias_name = str(alias_this)
+                elif isinstance(alias, str):
+                    alias_name = alias
+                else:
+                    alias_name = str(alias)
+            
+            if table_name_clean in cte_names:
+                resolved_name = table_name_clean
+            else:
+                resolved_name = full_table_name
+            
+            if alias_name:
+                alias_name_clean = strip_brackets(alias_name)
+                alias_map[alias_name_clean] = resolved_name
+                alias_map[alias_name_clean.lower()] = resolved_name
+            
+            alias_map[table_name_clean] = resolved_name
+            if isinstance(table_name_clean, str):
+                alias_map[table_name_clean.lower()] = resolved_name
+    
+    # Handle UPDATE
+    if isinstance(stmt, exp.Update):
+        if stmt.this:
+            if isinstance(stmt.this, exp.Table):
+                extract_table_alias(stmt.this, alias_map, cte_names)
+            elif hasattr(stmt.this, 'this') and isinstance(stmt.this.this, exp.Table):
+                extract_table_alias(stmt.this.this, alias_map, cte_names)
+        
+        from_expr = stmt.args.get("from") or stmt.args.get("from_")
+        if from_expr:
+            if isinstance(from_expr, exp.From):
+                extract_table_alias(from_expr.this, alias_map, cte_names)
+            elif isinstance(from_expr, exp.Table):
+                extract_table_alias(from_expr, alias_map, cte_names)
+        
+        for join in stmt.args.get("joins", []):
+            if isinstance(join, exp.Join):
+                extract_table_alias(join.this, alias_map, cte_names)
+    
+    # Handle INSERT
+    elif isinstance(stmt, exp.Insert):
+        if stmt.this:
+            if isinstance(stmt.this, exp.Table):
+                extract_table_alias(stmt.this, alias_map, cte_names)
+        
+        # Process SELECT in INSERT ... SELECT
+        if hasattr(stmt, 'expression') and isinstance(stmt.expression, exp.Select):
+            select_alias_map = build_alias_map(stmt.expression)
+            alias_map.update(select_alias_map)
+    
+    # Handle DELETE
+    elif isinstance(stmt, exp.Delete):
+        if stmt.this:
+            if isinstance(stmt.this, exp.Table):
+                extract_table_alias(stmt.this, alias_map, cte_names)
+            elif hasattr(stmt.this, 'this') and isinstance(stmt.this.this, exp.Table):
+                extract_table_alias(stmt.this.this, alias_map, cte_names)
+        
+        from_expr = stmt.args.get("from") or stmt.args.get("from_")
+        if from_expr:
+            if isinstance(from_expr, exp.From):
+                extract_table_alias(from_expr.this, alias_map, cte_names)
+            elif isinstance(from_expr, exp.Table):
+                extract_table_alias(from_expr, alias_map, cte_names)
+        
+        for join in stmt.args.get("joins", []):
+            if isinstance(join, exp.Join):
+                extract_table_alias(join.this, alias_map, cte_names)
+    
+    # Handle MERGE
+    elif isinstance(stmt, exp.Merge):
+        if stmt.this:
+            if isinstance(stmt.this, exp.Table):
+                extract_table_alias(stmt.this, alias_map, cte_names)
+            elif hasattr(stmt.this, 'this') and isinstance(stmt.this.this, exp.Table):
+                extract_table_alias(stmt.this.this, alias_map, cte_names)
+        
+        using_expr = stmt.args.get("using")
+        if using_expr:
+            if isinstance(using_expr, exp.Table):
+                extract_table_alias(using_expr, alias_map, cte_names)
+            elif isinstance(using_expr, exp.Subquery):
+                if using_expr.alias:
+                    alias_name = using_expr.alias.name if hasattr(using_expr.alias, 'name') else str(using_expr.alias)
+                    if alias_name:
+                        alias_name_clean = strip_brackets(alias_name)
+                        alias_map[alias_name_clean] = alias_name_clean
+                        alias_map[alias_name_clean.lower()] = alias_name_clean
+                # Process subquery
+                if using_expr.this:
+                    select_alias_map = build_alias_map(using_expr.this)
+                    alias_map.update(select_alias_map)
+    
+    return alias_map
+
+
 def build_scope_alias_maps(stmt: exp.Expression) -> dict:
     """
     Build scope-aware alias maps where each SELECT scope has its own alias map.
@@ -676,11 +985,11 @@ def build_scope_alias_maps(stmt: exp.Expression) -> dict:
 def get_scope_for_column(col: exp.Column, scope_maps: dict) -> dict:
     """
     Find the appropriate scope (alias map) for a given column by walking up the AST.
-    Returns the alias map for the closest containing SELECT.
+    Returns the alias map for the closest containing SELECT, UPDATE, INSERT, MERGE, or DELETE.
     """
     node = col
     while node:
-        if isinstance(node, exp.Select) and id(node) in scope_maps:
+        if isinstance(node, (exp.Select, exp.Update, exp.Insert, exp.Merge, exp.Delete)) and id(node) in scope_maps:
             return scope_maps[id(node)]
         node = node.parent
     # Return empty dict if no scope found
@@ -1317,11 +1626,19 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                     continue
                 
                 try:
-                    # Build scope-aware alias maps for this statement
-                    scope_maps, global_cte_names = build_scope_alias_maps(stmt)
-                    
-                    # Also build flat alias map for fallback (last definition wins)
-                    alias_map = build_alias_map(stmt)
+                    # Handle different statement types
+                    # For UPDATE, INSERT, MERGE, DELETE, we need to handle them specially
+                    if isinstance(stmt, (exp.Update, exp.Insert, exp.Merge, exp.Delete)):
+                        # For DML statements, build alias maps from their FROM/USING clauses
+                        # and extract columns from SET, VALUES, etc.
+                        scope_maps, global_cte_names = build_scope_alias_maps_for_dml(stmt)
+                        alias_map = build_alias_map_for_dml(stmt)
+                    else:
+                        # Build scope-aware alias maps for this statement (SELECT, etc.)
+                        scope_maps, global_cte_names = build_scope_alias_maps(stmt)
+                        
+                        # Also build flat alias map for fallback (last definition wins)
+                        alias_map = build_alias_map(stmt)
                     
                     # Create case-insensitive alias map
                     case_insensitive_alias_map = {}
@@ -1391,9 +1708,11 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                                 table_name = (unqualified_map.get(col_name) or 
                                             unqualified_map.get(col_name.lower()))
                             
-                            # If still no table name and column was originally unqualified, use fallback
+                            # If still no table name and column was originally unqualified, check if it's a SELECT alias
                             if not table_name and was_unqualified:
-                                # Try to get fallback table from FROM clause
+                                col_name = col.name if isinstance(col.name, str) else str(col.name)
+                                
+                                # Check if this column name is actually a SELECT alias (computed column)
                                 # Find the SELECT statement this column belongs to
                                 current_select = None
                                 for select in stmt.find_all(exp.Select):
@@ -1402,6 +1721,24 @@ def extract_table_columns(sql: str, dialect: Optional[str] = None, filepath: Opt
                                         break
                                 
                                 if current_select:
+                                    # Check if col_name matches any SELECT alias
+                                    is_select_alias = False
+                                    for expr in current_select.expressions:
+                                        # Check if this expression has an alias matching our column name
+                                        if hasattr(expr, 'alias'):
+                                            alias = expr.alias
+                                            if alias:
+                                                alias_name = alias.name if hasattr(alias, 'name') else str(alias)
+                                                if alias_name and alias_name.lower() == col_name.lower():
+                                                    # This is a SELECT alias, not a table column - skip it
+                                                    is_select_alias = True
+                                                    break
+                                    
+                                    if is_select_alias:
+                                        # Skip computed column aliases - they're not real table columns
+                                        continue
+                                    
+                                    # Not a SELECT alias, try fallback table
                                     fallback_table = get_fallback_table(current_select)
                                     if fallback_table:
                                         table_name = fallback_table
